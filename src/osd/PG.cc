@@ -4080,15 +4080,14 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
 	   * left end of the range if we are a tier because they may legitimately
 	   * not exist (see _scrub).
 	   */
-	  unsigned min = MIN(3, cct->_conf->osd_scrub_chunk_max);
-          bool boundary_found = false;
+	  unsigned min = MAX(3, cct->_conf->osd_scrub_chunk_min);
           hobject_t start = scrubber.start;
 	  hobject_t candidate_end;
 	  vector<hobject_t> objects;
 	  ret = get_pgbackend()->objects_list_partial(
 	    start,
 	    min,
-	    MIN(min, cct->_conf->osd_scrub_chunk_max),
+	    MAX(min, cct->_conf->osd_scrub_chunk_max),
 	    &objects,
 	    &candidate_end);
 	  assert(ret >= 0);
