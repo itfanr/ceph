@@ -6,7 +6,7 @@ if test -e build; then
 fi
 mkdir build
 cd build
-cmake $@ ..
+cmake -DBOOST_J=$(nproc) $@ ..
 
 cat <<EOF > ceph.conf
 plugin dir = lib
