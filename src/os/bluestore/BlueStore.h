@@ -60,7 +60,9 @@ enum {
   l_bluestore_state_done_lat,
   l_bluestore_compress_lat,
   l_bluestore_decompress_lat,
+  l_bluestore_csum_lat,
   l_bluestore_compress_success_count,
+  l_bluestore_compress_rejected_count,
   l_bluestore_write_pad_bytes,
   l_bluestore_wal_write_ops,
   l_bluestore_wal_write_bytes,
@@ -85,6 +87,7 @@ enum {
   l_bluestore_write_small_new,
   l_bluestore_txc,
   l_bluestore_onode_reshard,
+  l_bluestore_gc_bytes,
   l_bluestore_last
 };
 
@@ -357,7 +360,15 @@ public:
       assert(n > 0);
     }
 
-    SharedBlobRef lookup(uint64_t sbid);
+    SharedBlobRef lookup(uint64_t sbid) {
+      std::lock_guard<std::mutex> l(lock);
+      dummy.sbid = sbid;
+      auto p = uset.find(dummy);
+      if (p == uset.end()) {
+        return nullptr;
+      }
+      return &*p;
+    }
 
     void add(SharedBlob *sb) {
       std::lock_guard<std::mutex> l(lock);
@@ -495,12 +506,13 @@ public:
     uint32_t logical_offset = 0;      ///< logical offset
     uint32_t blob_offset = 0;         ///< blob offset
     uint32_t length = 0;              ///< length
+    uint8_t  blob_depth;              /// blob overlapping count
     BlobRef blob;                     ///< the blob with our data
 
     explicit Extent() {}
     explicit Extent(uint32_t lo) : logical_offset(lo) {}
-    Extent(uint32_t lo, uint32_t o, uint32_t l, BlobRef& b)
-      : logical_offset(lo), blob_offset(o), length(l), blob(b) {}
+    Extent(uint32_t lo, uint32_t o, uint32_t l, uint8_t bd, BlobRef& b)
+      : logical_offset(lo), blob_offset(o), length(l), blob_depth(bd), blob(b){}
 
     // comparators for intrusive_set
     friend bool operator<(const Extent &a, const Extent &b) {
@@ -511,6 +523,11 @@ public:
     }
     friend bool operator==(const Extent &a, const Extent &b) {
       return a.logical_offset == b.logical_offset;
+    }
+
+    uint32_t blob_end() {
+      return logical_offset + blob->get_blob().get_logical_length() -
+	blob_offset;
     }
 
     bool blob_escapes_range(uint32_t o, uint32_t l) {
@@ -546,6 +563,7 @@ public:
 
     ExtentMap(Onode *o);
     ~ExtentMap() {
+      spanning_blob_map.clear_and_dispose([&](Blob *b) { b->put(); });
       extent_map.clear_and_dispose([&](Extent *e) { delete e; });
     }
 
@@ -564,21 +582,28 @@ public:
     /// initialize Shards from the onode
     void init_shards(Onode *on, bool loaded, bool dirty);
 
-    /// return shard containing offset
-    vector<Shard>::iterator seek_shard(uint32_t offset) {
-      // fixme: we could do a binary search here
-      // we want the right-most shard that has an offset <= @offset.
-      vector<Shard>::iterator p = shards.begin();
-      while (p != shards.end() &&
-	     p->offset <= offset) {
-	++p;
+    /// return index of shard containing offset
+    /// or -1 if not found
+    int seek_shard(uint32_t offset) {
+      size_t end = shards.size();
+      size_t mid, left = 0;
+      size_t right = end; // one passed the right end
+
+      while (left < right) {
+        mid = left + (right - left) / 2;
+        if (offset >= shards[mid].offset) {
+          size_t next = mid + 1;
+          if (next >= end || offset < shards[next].offset)
+            return mid;
+          //continue to search forwards
+          left = next;
+        } else {
+          //continue to search backwards
+          right = mid;
+        }
       }
-      if (p != shards.begin()) {
-	assert(p == shards.end() || p->offset > offset);
-	--p;
-	assert(p->offset <= offset);
-      }
-      return p;
+
+      return -1; // not found
     }
 
     /// ensure that a range of the map is loaded
@@ -598,8 +623,8 @@ public:
     extent_map_t::iterator seek_lextent(uint64_t offset);
 
     /// add a new Extent
-    void add(uint32_t lo, uint32_t o, uint32_t l, BlobRef& b) {
-      extent_map.insert(*new Extent(lo, o, l, b));
+    void add(uint32_t lo, uint32_t o, uint32_t l, uint8_t bd, BlobRef& b) {
+      extent_map.insert(*new Extent(lo, o, l, bd, b));
     }
 
     /// remove (and delete) an Extent
@@ -621,8 +646,8 @@ public:
     /// put new lextent into lextent_map overwriting existing ones if
     /// any and update references accordingly
     Extent *set_lextent(uint64_t logical_offset,
-			uint64_t offset, uint64_t length, BlobRef b,
-			extent_map_t *old_extents);
+			uint64_t offset, uint64_t length, uint8_t blob_depth,
+                        BlobRef b, extent_map_t *old_extents);
 
   };
 
@@ -1053,7 +1078,6 @@ public:
 
       void encode(bufferlist& bl) {
         for (size_t i = 0; i < STATFS_LAST; i++) {
-          //::encode(ceph_le64(values[i]), bl);
           ::encode(values[i], bl);
         }
       }
@@ -1070,17 +1094,6 @@ public:
     uint64_t last_nid = 0;     ///< if non-zero, highest new nid we allocated
     uint64_t last_blobid = 0;  ///< if non-zero, highest new blobid we allocated
 
-    struct DeferredCsum {
-      BlobRef blob;
-      uint64_t b_off;
-      bufferlist data;
-
-      DeferredCsum(BlobRef& b, uint64_t bo, bufferlist& bl)
-	: blob(b), b_off(bo), data(bl) {}
-    };
-
-    list<DeferredCsum> deferred_csum;
-
     explicit TransContext(OpSequencer *o)
       : state(STATE_PREPARE),
 	osr(o),
@@ -1092,11 +1105,9 @@ public:
 	wal_txn(NULL),
 	ioc(this),
 	start(ceph_clock_now(g_ceph_context)) {
-      //cout << "txc new " << this << std::endl;
     }
     ~TransContext() {
       delete wal_txn;
-      //cout << "txc del " << this << std::endl;
     }
 
     void write_onode(OnodeRef &o) {
@@ -1104,10 +1115,6 @@ public:
     }
     void write_shared_blob(SharedBlobRef &sb) {
       shared_blobs.insert(sb);
-    }
-
-    void add_deferred_csum(BlobRef& b, uint64_t bo, bufferlist& bl) {
-      deferred_csum.emplace_back(TransContext::DeferredCsum(b, bo, bl));
     }
   };
 
@@ -1324,7 +1331,11 @@ private:
   std::mutex reap_lock;
   list<CollectionRef> removed_collections;
 
-  int csum_type;
+  RWLock debug_read_error_lock;
+  set<ghobject_t, ghobject_t::BitwiseComparator> debug_data_error_objects;
+  set<ghobject_t, ghobject_t::BitwiseComparator> debug_mdata_error_objects;
+
+  std::atomic<int> csum_type;
 
   uint64_t block_size;     ///< block size of block device (power of 2)
   uint64_t block_mask;     ///< mask to get just the block offset
@@ -1354,10 +1365,10 @@ private:
     default: return "???";
     }
   }
-  CompressionMode comp_mode = COMP_NONE;      ///< compression mode
+  std::atomic<int> comp_mode = {COMP_NONE}; ///< compression mode
   CompressorRef compressor;
-  uint64_t comp_min_blob_size = 0;
-  uint64_t comp_max_blob_size = 0;
+  std::atomic<uint64_t> comp_min_blob_size = {0};
+  std::atomic<uint64_t> comp_max_blob_size = {0};
 
   // --------------------------------------------------------
   // private methods
@@ -1663,6 +1674,38 @@ public:
     TrackedOpRef op = TrackedOpRef(),
     ThreadPool::TPHandle *handle = NULL) override;
 
+  // error injection
+  void inject_data_error(const ghobject_t& o) override {
+    RWLock::WLocker l(debug_read_error_lock);
+    debug_data_error_objects.insert(o);
+  }
+  void inject_mdata_error(const ghobject_t& o) override {
+    RWLock::WLocker l(debug_read_error_lock);
+    debug_mdata_error_objects.insert(o);
+  }
+private:
+  bool _debug_data_eio(const ghobject_t& o) {
+    if (!g_conf->bluestore_debug_inject_read_err) {
+      return false;
+    }
+    RWLock::RLocker l(debug_read_error_lock);
+    return debug_data_error_objects.count(o);
+  }
+  bool _debug_mdata_eio(const ghobject_t& o) {
+    if (!g_conf->bluestore_debug_inject_read_err) {
+      return false;
+    }
+    RWLock::RLocker l(debug_read_error_lock);
+    return debug_mdata_error_objects.count(o);
+  }
+  void _debug_obj_on_delete(const ghobject_t& o) {
+    if (g_conf->bluestore_debug_inject_read_err) {
+      RWLock::WLocker l(debug_read_error_lock);
+      debug_data_error_objects.erase(o);
+      debug_mdata_error_objects.erase(o);
+    }
+  }
+
 private:
 
   // --------------------------------------------------------
@@ -1678,11 +1721,11 @@ private:
   // write ops
 
   struct WriteContext {
-    unsigned fadvise_flags = 0;  ///< write flags
-    bool buffered = false;       ///< buffered write
-    bool compress = false;       ///< compressed write
-    uint64_t comp_blob_size = 0; ///< target compressed blob size
-    unsigned csum_order = 0;     ///< target checksum chunk order
+    bool buffered = false;          ///< buffered write
+    bool compress = false;          ///< compressed write
+    uint64_t target_blob_size = 0;  ///< target (max) blob size
+    uint8_t blob_depth = 0;         ///< depth of the logical extent
+    unsigned csum_order = 0;        ///< target checksum chunk order
 
     extent_map_t old_extents;       ///< must deref these blobs
 
@@ -1738,12 +1781,29 @@ private:
 	     uint32_t fadvise_flags);
   void _pad_zeros(bufferlist *bl, uint64_t *offset,
 		  uint64_t chunk_size);
+
+  bool _do_write_check_depth(
+    OnodeRef o,
+    uint64_t start_offset,
+    uint64_t end_offset,
+    uint8_t  *blob_depth,
+    uint64_t *gc_start_offset,
+    uint64_t *gc_end_offset);
+
   int _do_write(TransContext *txc,
 		CollectionRef &c,
 		OnodeRef o,
 		uint64_t offset, uint64_t length,
 		bufferlist& bl,
 		uint32_t fadvise_flags);
+  void _do_write_data(TransContext *txc,
+                      CollectionRef& c,
+                      OnodeRef o,
+                      uint64_t offset,
+                      uint64_t length,
+                      bufferlist& bl,
+                      WriteContext *wctx);
+
   int _touch(TransContext *txc,
 	     CollectionRef& c,
 	     OnodeRef& o);

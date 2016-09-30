@@ -750,7 +750,7 @@ namespace librbd {
   {
     ImageCtx *ictx = reinterpret_cast<ImageCtx *>(ctx);
     tracepoint(librbd, update_features_enter, ictx, features, enabled);
-    int r = librbd::update_features(ictx, features, enabled);
+    int r = ictx->operations->update_features(features, enabled);
     tracepoint(librbd, update_features_exit, r);
     return r;
   }
@@ -1399,7 +1399,7 @@ namespace librbd {
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, metadata_set_enter, ictx, key.c_str(), value.c_str());
-    int r = librbd::metadata_set(ictx, key, value);
+    int r = ictx->operations->metadata_set(key, value);
     tracepoint(librbd, metadata_set_exit, r);
     return r;
   }
@@ -1408,7 +1408,7 @@ namespace librbd {
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, metadata_remove_enter, ictx, key.c_str());
-    int r = librbd::metadata_remove(ictx, key);
+    int r = ictx->operations->metadata_remove(key);
     tracepoint(librbd, metadata_remove_exit, r);
     return r;
   }
@@ -2164,7 +2164,7 @@ extern "C" int rbd_update_features(rbd_image_t image, uint64_t features,
   librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx *>(image);
   bool features_enabled = enabled != 0;
   tracepoint(librbd, update_features_enter, ictx, features, features_enabled);
-  int r = librbd::update_features(ictx, features, features_enabled);
+  int r = ictx->operations->update_features(features, features_enabled);
   tracepoint(librbd, update_features_exit, r);
   return r;
 }
@@ -2882,7 +2882,7 @@ extern "C" int rbd_metadata_set(rbd_image_t image, const char *key, const char *
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   tracepoint(librbd, metadata_set_enter, ictx, key, value);
-  int r = librbd::metadata_set(ictx, key, value);
+  int r = ictx->operations->metadata_set(key, value);
   tracepoint(librbd, metadata_set_exit, r);
   return r;
 }
@@ -2891,7 +2891,7 @@ extern "C" int rbd_metadata_remove(rbd_image_t image, const char *key)
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   tracepoint(librbd, metadata_remove_enter, ictx, key);
-  int r = librbd::metadata_remove(ictx, key);
+  int r = ictx->operations->metadata_remove(key);
   tracepoint(librbd, metadata_remove_exit, r);
   return r;
 }

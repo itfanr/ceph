@@ -7,12 +7,12 @@
 #include "include/int_types.h"
 #include "include/Context.h"
 #include "include/rados/librados.hpp"
+#include "common/AsyncOpTracker.h"
 #include "common/Cond.h"
 #include "common/Mutex.h"
 #include "common/RefCountedObj.h"
 #include "common/WorkQueue.h"
 #include "cls/journal/cls_journal_types.h"
-#include "journal/AsyncOpTracker.h"
 #include "journal/JournalMetadataListener.h"
 #include "journal/Settings.h"
 #include <boost/intrusive_ptr.hpp>
@@ -71,7 +71,8 @@ public:
   void allocate_tag(uint64_t tag_class, const bufferlist &data,
                     Tag *tag, Context *on_finish);
   void get_tag(uint64_t tag_tid, Tag *tag, Context *on_finish);
-  void get_tags(const boost::optional<uint64_t> &tag_class, Tags *tags,
+  void get_tags(uint64_t start_after_tag_tid,
+                const boost::optional<uint64_t> &tag_class, Tags *tags,
                 Context *on_finish);
 
   inline const Settings &get_settings() const {
@@ -95,6 +96,10 @@ public:
 
   inline void queue(Context *on_finish, int r) {
     m_work_queue->queue(on_finish, r);
+  }
+
+  inline ContextWQ *get_work_queue() {
+    return m_work_queue;
   }
 
   inline SafeTimer &get_timer() {

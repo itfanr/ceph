@@ -310,7 +310,8 @@ static int read_policy(RGWRados *store,
     obj.init_ns(bucket, oid, mp_ns);
     obj.set_in_extra_data(true);
   } else {
-    obj = rgw_obj(bucket, object);
+    obj = rgw_obj(bucket, object.name);
+    obj.set_instance(object.instance);
   }
   int ret = get_policy_from_attr(s->cct, store, s->obj_ctx, bucket_info, bucket_attrs, policy, obj);
   if (ret == -ENOENT && !object.empty()) {
@@ -504,6 +505,7 @@ int rgw_build_object_policies(RGWRados *store, struct req_state *s,
     s->object_acl = new RGWAccessControlPolicy(s->cct);
 
     rgw_obj obj(s->bucket, s->object);
+      
     store->set_atomic(s->obj_ctx, obj);
     if (prefetch_data) {
       store->set_prefetch_data(s->obj_ctx, obj);
@@ -524,7 +526,8 @@ static void rgw_bucket_object_pre_exec(struct req_state *s)
 
 int RGWGetObj::verify_permission()
 {
-  obj = rgw_obj(s->bucket, s->object);
+  obj = rgw_obj(s->bucket, s->object.name);
+  obj.set_instance(s->object.instance);
   store->set_atomic(s->obj_ctx, obj);
   if (get_data) {
     store->set_prefetch_data(s->obj_ctx, obj);
@@ -2947,22 +2950,6 @@ int RGWPostObj::verify_permission()
   return 0;
 }
 
-RGWPutObjProcessor *RGWPostObj::select_processor(RGWObjectCtx& obj_ctx)
-{
-  RGWPutObjProcessor *processor;
-
-  uint64_t part_size = s->cct->_conf->rgw_obj_stripe_size;
-
-  processor = new RGWPutObjProcessor_Atomic(obj_ctx, s->bucket_info, s->bucket, s->object.name, part_size, s->req_id, s->bucket_info.versioning_enabled());
-
-  return processor;
-}
-
-void RGWPostObj::dispose_processor(RGWPutObjProcessor *processor)
-{
-  delete processor;
-}
-
 void RGWPostObj::pre_exec()
 {
   rgw_bucket_object_pre_exec(s);
@@ -2970,7 +2957,6 @@ void RGWPostObj::pre_exec()
 
 void RGWPostObj::execute()
 {
-  RGWPutObjProcessor *processor = NULL;
   char calc_md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
   unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
   MD5 hash;
@@ -2979,29 +2965,39 @@ void RGWPostObj::execute()
 
   // read in the data from the POST form
   op_ret = get_params();
-  if (op_ret < 0)
-    goto done;
+  if (op_ret < 0) {
+    return;
+  }
 
   op_ret = verify_params();
-  if (op_ret < 0)
-    goto done;
+  if (op_ret < 0) {
+    return;
+  }
 
   if (!verify_bucket_permission(s, RGW_PERM_WRITE)) {
     op_ret = -EACCES;
-    goto done;
+    return;
   }
 
   op_ret = store->check_quota(s->bucket_owner.get_id(), s->bucket,
 			      user_quota, bucket_quota, s->content_length);
   if (op_ret < 0) {
-    goto done;
+    return;
   }
 
-  processor = select_processor(*static_cast<RGWObjectCtx *>(s->obj_ctx));
+  RGWPutObjProcessor_Atomic processor(*static_cast<RGWObjectCtx *>(s->obj_ctx),
+                                      s->bucket_info,
+                                      s->bucket,
+                                      s->object.name,
+                                      /* part size */
+                                      s->cct->_conf->rgw_obj_stripe_size,
+                                      s->req_id,
+                                      s->bucket_info.versioning_enabled());
 
-  op_ret = processor->prepare(store, NULL);
-  if (op_ret < 0)
-    goto done;
+  op_ret = processor.prepare(store, nullptr);
+  if (op_ret < 0) {
+    return;
+  }
 
   while (data_pending) {
      bufferlist data;
@@ -3009,25 +3005,25 @@ void RGWPostObj::execute()
 
      if (len < 0) {
        op_ret = len;
-       goto done;
+       return;
      }
 
      if (!len)
        break;
 
-     op_ret = put_data_and_throttle(processor, data, ofs, &hash, false);
+     op_ret = put_data_and_throttle(&processor, data, ofs, &hash, false);
 
      ofs += len;
 
      if (ofs > max_len) {
        op_ret = -ERR_TOO_LARGE;
-       goto done;
+       return;
      }
    }
 
   if (len < min_len) {
     op_ret = -ERR_TOO_SMALL;
-    goto done;
+    return;
   }
 
   s->obj_size = ofs;
@@ -3035,10 +3031,10 @@ void RGWPostObj::execute()
   op_ret = store->check_quota(s->bucket_owner.get_id(), s->bucket,
 			      user_quota, bucket_quota, s->obj_size);
   if (op_ret < 0) {
-    goto done;
+    return;
   }
 
-  processor->complete_hash(&hash);
+  processor.complete_hash(&hash);
   hash.Final(m);
   buf_to_hex(m, CEPH_CRYPTO_MD5_DIGESTSIZE, calc_md5);
 
@@ -3055,10 +3051,7 @@ void RGWPostObj::execute()
     emplace_attr(RGW_ATTR_CONTENT_TYPE, std::move(ct_bl));
   }
 
-  op_ret = processor->complete(etag, NULL, real_time(), attrs, delete_at);
-
-done:
-  dispose_processor(processor);
+  op_ret = processor.complete(etag, NULL, real_time(), attrs, delete_at);
 }
 
 
@@ -5179,7 +5172,7 @@ void RGWSetAttrs::execute()
   store->set_atomic(s->obj_ctx, obj);
 
   if (!s->object.empty()) {
-    op_ret = store->set_attrs(s->obj_ctx, obj, attrs, &attrs);
+    op_ret = store->set_attrs(s->obj_ctx, obj, attrs, nullptr);
   } else {
     for (auto& iter : attrs) {
       s->bucket_attrs[iter.first] = std::move(iter.second);

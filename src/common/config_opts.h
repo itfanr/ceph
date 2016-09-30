@@ -158,6 +158,8 @@ SUBSYS(leveldb, 4, 5)
 SUBSYS(memdb, 4, 5)
 SUBSYS(kinetic, 1, 5)
 SUBSYS(fuse, 1, 5)
+SUBSYS(mgr, 1, 5)
+SUBSYS(mgrc, 1, 5)
 
 OPTION(key, OPT_STR, "")
 OPTION(keyfile, OPT_STR, "")
@@ -231,7 +233,7 @@ OPTION(mon_osd_adjust_down_out_interval, OPT_BOOL, true)  // true if we should s
 OPTION(mon_osd_auto_mark_in, OPT_BOOL, false)         // mark any booting osds 'in'
 OPTION(mon_osd_auto_mark_auto_out_in, OPT_BOOL, true) // mark booting auto-marked-out osds 'in'
 OPTION(mon_osd_auto_mark_new_in, OPT_BOOL, true)      // mark booting new osds 'in'
-OPTION(mon_osd_down_out_interval, OPT_INT, 300) // seconds
+OPTION(mon_osd_down_out_interval, OPT_INT, 600) // seconds
 OPTION(mon_osd_down_out_subtree_limit, OPT_STR, "rack")   // smallest crush unit/type that we will not automatically mark out
 OPTION(mon_osd_min_up_ratio, OPT_DOUBLE, .3)    // min osds required to be up to mark things down
 OPTION(mon_osd_min_in_ratio, OPT_DOUBLE, .3)   // min osds required to be in to mark things out
@@ -961,8 +963,9 @@ OPTION(bluestore_block_wal_path, OPT_STR, "")
 OPTION(bluestore_block_wal_size, OPT_U64, 96 * 1024*1024) // rocksdb wal
 OPTION(bluestore_block_wal_create, OPT_BOOL, false)
 OPTION(bluestore_block_preallocate_file, OPT_BOOL, false) //whether preallocate space if block/db_path/wal_path is file rather that block device.
-OPTION(bluestore_csum, OPT_BOOL, true)
-OPTION(bluestore_csum_type, OPT_STR, "crc32c")
+OPTION(bluestore_precondition_bluefs, OPT_U64, 128*1024*1024)  // write this much data at mkfs
+OPTION(bluestore_precondition_bluefs_block, OPT_U64, 1048576)
+OPTION(bluestore_csum_type, OPT_STR, "crc32c") // none|xxhash32|xxhash64|crc32c|crc32c_16|crc32c_8
 OPTION(bluestore_min_csum_block, OPT_U32, 4096)
 OPTION(bluestore_max_csum_block, OPT_U32, 64*1024)
 OPTION(bluestore_min_alloc_size, OPT_U32, 0)
@@ -971,8 +974,11 @@ OPTION(bluestore_min_alloc_size_ssd, OPT_U32, 4*1024)
 OPTION(bluestore_max_alloc_size, OPT_U32, 0)
 OPTION(bluestore_compression, OPT_STR, "none")  // force|aggressive|passive|none
 OPTION(bluestore_compression_algorithm, OPT_STR, "snappy")
-OPTION(bluestore_compression_min_blob_size, OPT_U32, 256*1024)
-OPTION(bluestore_compression_max_blob_size, OPT_U32, 4*1024*1024)
+OPTION(bluestore_compression_min_blob_size, OPT_U32, 128*1024)
+OPTION(bluestore_compression_max_blob_size, OPT_U32, 512*1024)
+OPTION(bluestore_max_blob_size, OPT_U32, 512*1024)
+OPTION(bluestore_gc_max_blob_depth, OPT_U32, 3)
+OPTION(bluestore_gc_merge_data, OPT_BOOL, true)
 /*
  * Require the net gain of compression at least to be at this ratio,
  * otherwise we don't compress.
@@ -982,6 +988,7 @@ OPTION(bluestore_compression_required_ratio, OPT_DOUBLE, .875)
 OPTION(bluestore_extent_map_shard_max_size, OPT_U32, 1200)
 OPTION(bluestore_extent_map_shard_target_size, OPT_U32, 500)
 OPTION(bluestore_extent_map_shard_min_size, OPT_U32, 150)
+OPTION(bluestore_extent_map_shard_target_size_slop, OPT_DOUBLE, .2)
 OPTION(bluestore_extent_map_inline_shard_prealloc_size, OPT_U32, 256)
 OPTION(bluestore_cache_type, OPT_STR, "2q")   // lru, 2q
 OPTION(bluestore_onode_cache_size, OPT_U32, 16*1024)
@@ -1019,6 +1026,7 @@ OPTION(bluestore_debug_small_allocations, OPT_INT, 0)
 OPTION(bluestore_debug_freelist, OPT_BOOL, false)
 OPTION(bluestore_debug_prefill, OPT_FLOAT, 0)
 OPTION(bluestore_debug_prefragment_max, OPT_INT, 1048576)
+OPTION(bluestore_debug_inject_read_err, OPT_BOOL, false)
 OPTION(bluestore_inject_wal_apply_delay, OPT_FLOAT, 0)
 OPTION(bluestore_shard_finishers, OPT_BOOL, false)
 
@@ -1107,6 +1115,7 @@ OPTION(filestore_fsync_flushes_journal_data, OPT_BOOL, false)
 OPTION(filestore_fiemap, OPT_BOOL, false)     // (try to) use fiemap
 OPTION(filestore_punch_hole, OPT_BOOL, false)
 OPTION(filestore_seek_data_hole, OPT_BOOL, false)     // (try to) use seek_data/hole
+OPTION(filestore_splice, OPT_BOOL, false)
 OPTION(filestore_fadvise, OPT_BOOL, true)
 //collect device partition information for management application to use
 OPTION(filestore_collect_device_partition_information, OPT_BOOL, true)
@@ -1497,6 +1506,11 @@ OPTION(rgw_period_push_interval, OPT_DOUBLE, 2) // seconds to wait before retryi
 OPTION(rgw_period_push_interval_max, OPT_DOUBLE, 30) // maximum interval after exponential backoff
 
 OPTION(rgw_swift_versioning_enabled, OPT_BOOL, false) // whether swift object versioning feature is enabled
+OPTION(mgr_module_path, OPT_STR, CEPH_PKGLIBDIR "/mgr") // where to load python modules from
+OPTION(mgr_modules, OPT_STR, "rest")  // Which modules to load
+OPTION(mgr_data, OPT_STR, "/var/lib/ceph/mgr/$cluster-$id") // where to find keyring etc
+OPTION(mgr_beacon_period, OPT_INT, 5)  // How frequently to send beacon
+OPTION(mon_mgr_beacon_grace, OPT_INT, 30)  // How long to wait to failover
 
 OPTION(rgw_list_bucket_min_readahead, OPT_INT, 1000) // minimum number of entries to read from rados for bucket listing
 

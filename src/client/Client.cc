@@ -1007,7 +1007,7 @@ void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, Me
   utime_t dttl = from;
   dttl += (float)dlease->duration_ms / 1000.0;
   
-  assert(dn && dn->inode);
+  assert(dn);
 
   if (dlease->mask & CEPH_LOCK_DN) {
     if (dttl > dn->lease_ttl) {
@@ -1133,7 +1133,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
 		   << ", readdir_start " << readdir_start << dendl;
 
     if (diri->snapid != CEPH_SNAPDIR &&
-	fg.is_leftmost() && readdir_offset == 2) {
+	fg.is_leftmost() && readdir_offset == 2 && readdir_start.empty()) {
       dirp->release_count = diri->dir_release_count;
       dirp->ordered_count = diri->dir_ordered_count;
       dirp->start_shared_gen = diri->shared_gen;
@@ -1325,13 +1325,21 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
       insert_dentry_inode(dir, dname, &dlease, in, request->sent_stamp, session,
                           (op == CEPH_MDS_OP_RENAME) ? request->old_dentry() : NULL);
     } else {
+      Dentry *dn = NULL;
       if (diri->dir && diri->dir->dentries.count(dname)) {
-	Dentry *dn = diri->dir->dentries[dname];
+	dn = diri->dir->dentries[dname];
 	if (dn->inode) {
 	  diri->dir_ordered_count++;
 	  clear_dir_complete_and_ordered(diri, false);
 	  unlink(dn, true, true);  // keep dir, dentry
 	}
+      }
+      if (dlease.duration_ms > 0) {
+	if (!dn) {
+	  Dir *dir = diri->open_dir();
+	  dn = link(dir, dname, NULL, NULL);
+	}
+	update_dentry_lease(dn, &dlease, request->sent_stamp, session);
       }
     }
   } else if (op == CEPH_MDS_OP_LOOKUPSNAP ||
@@ -1447,7 +1455,7 @@ mds_rank_t Client::choose_target_mds(MetaRequest *req)
     ldout(cct, 20) << "choose_target_mds " << *in << " is_hash=" << is_hash
              << " hash=" << hash << dendl;
   
-    if (is_hash && S_ISDIR(in->mode) && !in->dirfragtree.empty()) {
+    if (is_hash && S_ISDIR(in->mode) && !in->fragmap.empty()) {
       frag_t fg = in->dirfragtree[hash];
       if (in->fragmap.count(fg)) {
         mds = in->fragmap[fg];
@@ -1616,7 +1624,7 @@ int Client::verify_reply_trace(int r,
 int Client::make_request(MetaRequest *request,
 			 const UserPerm& perms,
 			 InodeRef *ptarget, bool *pcreated,
-			 int use_mds,
+			 mds_rank_t use_mds,
 			 bufferlist *pdirbl)
 {
   int r = 0;
@@ -1811,10 +1819,11 @@ int Client::encode_inode_release(Inode *in, MetaRequest *req,
       caps->issued &= ~drop;
       caps->implemented &= ~drop;
       released = 1;
-      force = 1;
       ldout(cct, 25) << "Now have: " << ccap_string(caps->issued) << dendl;
+    } else {
+      released = force;
     }
-    if (force) {
+    if (released) {
       ceph_mds_request_release rel;
       rel.ino = in->ino;
       rel.cap_id = caps->cap_id;
@@ -2540,27 +2549,28 @@ void Client::handle_mds_map(MMDSMap* m)
 
   // Cancel any commands for missing or laggy GIDs
   std::list<ceph_tid_t> cancel_ops;
-  for (std::map<ceph_tid_t, CommandOp>::iterator i = commands.begin();
-       i != commands.end(); ++i) {
-    const mds_gid_t op_mds_gid = i->second.mds_gid;
+  auto &commands = command_table.get_commands();
+  for (const auto &i : commands) {
+    auto &op = i.second;
+    const mds_gid_t op_mds_gid = op.mds_gid;
     if (mdsmap->is_dne_gid(op_mds_gid) || mdsmap->is_laggy_gid(op_mds_gid)) {
-      ldout(cct, 1) << __func__ << ": cancelling command op " << i->first << dendl;
-      cancel_ops.push_back(i->first);
-      if (i->second.outs) {
+      ldout(cct, 1) << __func__ << ": cancelling command op " << i.first << dendl;
+      cancel_ops.push_back(i.first);
+      if (op.outs) {
         std::ostringstream ss;
         ss << "MDS " << op_mds_gid << " went away";
-        *(i->second.outs) = ss.str();
+        *(op.outs) = ss.str();
       }
-      i->second.con->mark_down();
-      if (i->second.on_finish) {
-        i->second.on_finish->complete(-ETIMEDOUT);
+      op.con->mark_down();
+      if (op.on_finish) {
+        op.on_finish->complete(-ETIMEDOUT);
       }
     }
   }
 
   for (std::list<ceph_tid_t>::iterator i = cancel_ops.begin();
        i != cancel_ops.end(); ++i) {
-    commands.erase(*i);
+    command_table.erase(*i);
   }
 
   // reset session
@@ -3944,6 +3954,8 @@ public:
 
 void Client::_invalidate_kernel_dcache()
 {
+  if (unmounting)
+    return;
   if (can_invalidate_dentries && dentry_invalidate_cb && root->dir) {
     for (ceph::unordered_map<string, Dentry*>::iterator p = root->dir->dentries.begin();
 	 p != root->dir->dentries.end();
@@ -5472,31 +5484,28 @@ int Client::mds_command(
   // Send commands to targets
   C_GatherBuilder gather(cct, onfinish);
   for (const auto target_gid : non_laggy) {
-    ceph_tid_t tid = ++last_tid;
     const auto info = fsmap->get_info_gid(target_gid);
 
     // Open a connection to the target MDS
     entity_inst_t inst = info.get_inst();
     ConnectionRef conn = messenger->get_connection(inst);
 
-    // Generate CommandOp state
-    CommandOp op;
-    op.tid = tid;
+    // Generate MDSCommandOp state
+    auto &op = command_table.start_command();
+
     op.on_finish = gather.new_sub();
+    op.cmd = cmd;
     op.outbl = outbl;
     op.outs = outs;
+    op.inbl = inbl;
     op.mds_gid = target_gid;
     op.con = conn;
-    commands[op.tid] = op;
 
     ldout(cct, 4) << __func__ << ": new command op to " << target_gid
       << " tid=" << op.tid << cmd << dendl;
 
     // Construct and send MCommand
-    MCommand *m = new MCommand(monclient->get_fsid());
-    m->cmd = cmd;
-    m->set_data(inbl);
-    m->set_tid(tid);
+    MCommand *m = op.get_message(monclient->get_fsid());
     conn->send_message(m);
   }
   gather.activate();
@@ -5510,14 +5519,13 @@ void Client::handle_command_reply(MCommandReply *m)
 
   ldout(cct, 10) << __func__ << ": tid=" << m->get_tid() << dendl;
 
-  map<ceph_tid_t, CommandOp>::iterator opiter = commands.find(tid);
-  if (opiter == commands.end()) {
+  if (!command_table.exists(tid)) {
     ldout(cct, 1) << __func__ << ": unknown tid " << tid << ", dropping" << dendl;
     m->put();
     return;
   }
 
-  CommandOp const &op = opiter->second;
+  auto &op = command_table.get_command(tid);
   if (op.outbl) {
     op.outbl->claim(m->get_data());
   }
@@ -5528,6 +5536,8 @@ void Client::handle_command_reply(MCommandReply *m)
   if (op.on_finish) {
     op.on_finish->complete(m->r);
   }
+
+  command_table.erase(tid);
 
   m->put();
 }
@@ -9937,8 +9947,6 @@ int Client::ll_getattrx(Inode *in, struct ceph_statx *stx, unsigned int want,
 int Client::_ll_setattrx(Inode *in, struct ceph_statx *stx, int mask,
 			 const UserPerm& perms, InodeRef *inp)
 {
-  Mutex::Locker lock(client_lock);
-
   vinodeno_t vino = _get_vino(in);
 
   ldout(cct, 3) << "ll_setattrx " << vino << " mask " << hex << mask << dec
@@ -9968,6 +9976,7 @@ int Client::_ll_setattrx(Inode *in, struct ceph_statx *stx, int mask,
 int Client::ll_setattrx(Inode *in, struct ceph_statx *stx, int mask,
 			const UserPerm& perms)
 {
+  Mutex::Locker lock(client_lock);
   InodeRef target(in);
   int res = _ll_setattrx(in, stx, mask, perms, &target);
   if (res == 0) {
@@ -9983,9 +9992,9 @@ int Client::ll_setattr(Inode *in, struct stat *attr, int mask,
 		       const UserPerm& perms)
 {
   struct ceph_statx stx;
-
   stat_to_statx(attr, &stx);
 
+  Mutex::Locker lock(client_lock);
   InodeRef target(in);
   int res = _ll_setattrx(in, &stx, mask, perms, &target);
   if (res == 0) {
@@ -11725,8 +11734,7 @@ int Client::ll_read_block(Inode *in, uint64_t blockid,
   Mutex::Locker lock(client_lock);
   vinodeno_t vino = ll_get_vino(in);
   object_t oid = file_object_t(vino.ino, blockid);
-  int r = 0;
-  C_SaferCond cond;
+  C_SaferCond onfinish;
   bufferlist bl;
 
   objecter->read(oid,
@@ -11736,11 +11744,11 @@ int Client::ll_read_block(Inode *in, uint64_t blockid,
 		 vino.snapid,
 		 &bl,
 		 CEPH_OSD_FLAG_READ,
-		 &cond);
+                 &onfinish);
 
   client_lock.Unlock();
-  r = cond.wait();
-  client_lock.Lock(); // lock is going to unlock on exit.
+  int r = onfinish.wait();
+  client_lock.Lock();
 
   if (r >= 0) {
       bl.copy(0, bl.length(), buf);

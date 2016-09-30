@@ -2866,9 +2866,20 @@ void OSDMonitor::tick()
       dout(10) << "No full osds, removing full flag" << dendl;
       remove_flag(CEPH_OSDMAP_FULL);
     }
+
+    if (!mon->pgmon()->pg_map.nearfull_osds.empty()) {
+      dout(5) << "There are near full osds, setting nearfull flag" << dendl;
+      add_flag(CEPH_OSDMAP_NEARFULL);
+    } else if (osdmap.test_flag(CEPH_OSDMAP_NEARFULL)){
+      dout(10) << "No near full osds, removing nearfull flag" << dendl;
+      remove_flag(CEPH_OSDMAP_NEARFULL);
+    }
     if (pending_inc.new_flags != -1 &&
-	(pending_inc.new_flags ^ osdmap.flags) & CEPH_OSDMAP_FULL) {
-      dout(1) << "New setting for CEPH_OSDMAP_FULL -- doing propose" << dendl;
+       (pending_inc.new_flags ^ osdmap.flags) & (CEPH_OSDMAP_FULL | CEPH_OSDMAP_NEARFULL)) {
+      dout(1) << "New setting for" <<
+              (pending_inc.new_flags & CEPH_OSDMAP_FULL ? " CEPH_OSDMAP_FULL" : "") <<
+              (pending_inc.new_flags & CEPH_OSDMAP_NEARFULL ? " CEPH_OSDMAP_NEARFULL" : "")
+              << " -- doing propose" << dendl;
       do_propose = true;
     }
   }
@@ -3342,7 +3353,6 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
             // Drop error, continue to get other daemons' metadata
             dout(4) << "No metadata for osd." << i << dendl;
             r = 0;
-            continue;
           } else if (r < 0) {
             // Unexpected error
             goto reply;

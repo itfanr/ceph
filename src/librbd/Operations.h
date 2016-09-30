@@ -70,6 +70,17 @@ public:
   int snap_set_limit(uint64_t limit);
   void execute_snap_set_limit(uint64_t limit, Context *on_finish);
 
+  int update_features(uint64_t features, bool enabled);
+  void execute_update_features(uint64_t features, bool enabled,
+                               Context *on_finish, uint64_t journal_op_tid);
+
+  int metadata_set(const std::string &key, const std::string &value);
+  void execute_metadata_set(const std::string &key, const std::string &value,
+                            Context *on_finish);
+
+  int metadata_remove(const std::string &key);
+  void execute_metadata_remove(const std::string &key, Context *on_finish);
+
   int prepare_image_update();
 
 private:

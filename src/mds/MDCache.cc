@@ -6268,7 +6268,8 @@ void MDCache::truncate_inode_finish(CInode *in, LogSegment *ls)
   mds->mdlog->submit_entry(le, new C_MDC_TruncateLogged(this, in, mut));
 
   // flush immediately if there are readers/writers waiting
-  if (in->get_caps_wanted() & (CEPH_CAP_FILE_RD|CEPH_CAP_FILE_WR))
+  if (in->is_waiter_for(CInode::WAIT_TRUNC) ||
+      (in->get_caps_wanted() & (CEPH_CAP_FILE_RD|CEPH_CAP_FILE_WR)))
     mds->mdlog->flush();
 }
 
@@ -9091,12 +9092,6 @@ void MDCache::request_cleanup(MDRequestRef& mdr)
   // remove from map
   active_requests.erase(mdr->reqid);
 
-  // fail-safe!
-  if (was_replay && active_requests.empty()) {
-    dout(10) << " fail-safe queueing next replay op" << dendl;
-    mds->queue_one_replay();
-  }
-
   if (mds->logger)
     log_stat();
 
@@ -11844,7 +11839,7 @@ class C_MDS_EnqueueScrub : public Context
 public:
   ScrubHeaderRef header;
   C_MDS_EnqueueScrub(Formatter *f, Context *fin) :
-    formatter(f), on_finish(fin), header(new ScrubHeader()) {}
+    formatter(f), on_finish(fin), header(nullptr) {}
 
   Context *take_finisher() {
     Context *fin = on_finish;
@@ -11875,12 +11870,8 @@ void MDCache::enqueue_scrub(
   mdr->set_filepath(fp);
 
   C_MDS_EnqueueScrub *cs = new C_MDS_EnqueueScrub(f, fin);
-  ScrubHeaderRef &header = cs->header;
-  header->tag = tag;
-  header->force = force;
-  header->recursive = recursive;
-  header->repair = repair;
-  header->formatter = f;
+  cs->header = std::make_shared<ScrubHeader>(
+      tag, force, recursive, repair, f);
 
   mdr->internal_op_finish = cs;
   enqueue_scrub_work(mdr);
@@ -11904,16 +11895,18 @@ void MDCache::enqueue_scrub_work(MDRequestRef& mdr)
   ScrubHeaderRef &header = cs->header;
 
   // Cannot scrub same dentry twice at same time
-  if (in->scrub_info()->scrub_in_progress) {
+  if (in->scrub_infop && in->scrub_infop->scrub_in_progress) {
     mds->server->respond_to_request(mdr, -EBUSY);
     return;
+  } else {
+    in->scrub_info();
   }
 
-  header->origin = in;
+  header->set_origin(in);
 
   // only set completion context for non-recursive scrub, because we don't 
   // want to block asok caller on long running scrub
-  if (!header->recursive) {
+  if (!header->get_recursive()) {
     Context *fin = cs->take_finisher();
     mds->scrubstack->enqueue_inode_top(in, header,
 				       new MDSInternalContextWrapper(mds, fin));

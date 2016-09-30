@@ -963,6 +963,7 @@ void Server::force_clients_readonly()
 void Server::journal_and_reply(MDRequestRef& mdr, CInode *in, CDentry *dn, LogEvent *le, MDSInternalContextBase *fin)
 {
   dout(10) << "journal_and_reply tracei " << in << " tracedn " << dn << dendl;
+  assert(!mdr->has_completed);
 
   // note trace items for eventual reply.
   mdr->tracei = in;
@@ -1045,7 +1046,6 @@ void Server::early_reply(MDRequestRef& mdr, CInode *tracei, CDentry *tracedn)
 
   if (mdr->has_more() && mdr->more()->has_journaled_slaves) {
     dout(10) << "early_reply - there are journaled slaves, not allowed." << dendl;
-    mds->mdlog->flush();
     return; 
   }
 
@@ -1061,7 +1061,6 @@ void Server::early_reply(MDRequestRef& mdr, CInode *tracei, CDentry *tracedn)
 
   if (req->is_replay()) {
     dout(10) << " no early reply on replay op" << dendl;
-    mds->mdlog->flush();
     return;
   }
 
@@ -2893,18 +2892,16 @@ void Server::_lookup_ino_2(MDRequestRef& mdr, int r)
 void Server::handle_client_open(MDRequestRef& mdr)
 {
   MClientRequest *req = mdr->client_request;
+  dout(7) << "open on " << req->get_filepath() << dendl;
 
   int flags = req->head.args.open.flags;
   int cmode = ceph_flags_to_mode(flags);
-
-  bool need_auth = !file_mode_is_readonly(cmode) || (flags & O_TRUNC);
-
-  dout(7) << "open on " << req->get_filepath() << dendl;
-
   if (cmode < 0) {
     respond_to_request(mdr, -EINVAL);
     return;
   }
+  
+  bool need_auth = !file_mode_is_readonly(cmode) || (flags & O_TRUNC);
 
   if ((cmode & CEPH_FILE_MODE_WR) && mdcache->is_readonly()) {
     dout(7) << "read-only FS" << dendl;
@@ -3787,7 +3784,6 @@ void Server::handle_client_setattr(MDRequestRef& mdr)
       mds->locker->drop_locks(mdr.get());
       mdr->drop_local_auth_pins();
       cur->add_waiter(CInode::WAIT_TRUNC, new C_MDS_RetryRequest(mdcache, mdr));
-      mds->mdlog->flush();
       return;
     }
   }
@@ -3828,7 +3824,8 @@ void Server::handle_client_setattr(MDRequestRef& mdr)
 
     // adjust client's max_size?
     map<client_t,client_writeable_range_t> new_ranges;
-    mds->locker->calc_new_client_ranges(cur, pi->size, new_ranges);
+    bool max_increased = false;
+    mds->locker->calc_new_client_ranges(cur, pi->size, &new_ranges, &max_increased);
     if (pi->client_ranges != new_ranges) {
       dout(10) << " client_ranges " << pi->client_ranges << " -> " << new_ranges << dendl;
       pi->client_ranges = new_ranges;
@@ -3849,7 +3846,8 @@ void Server::handle_client_setattr(MDRequestRef& mdr)
 								   truncating_smaller, changed_ranges));
 
   // flush immediately if there are readers/writers waiting
-  if (cur->get_caps_wanted() & (CEPH_CAP_FILE_RD|CEPH_CAP_FILE_WR))
+  if (xlocks.count(&cur->filelock) &&
+      (cur->get_caps_wanted() & (CEPH_CAP_FILE_RD|CEPH_CAP_FILE_WR)))
     mds->mdlog->flush();
 }
 

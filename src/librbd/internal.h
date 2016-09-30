@@ -129,7 +129,6 @@ namespace librbd {
   int get_old_format(ImageCtx *ictx, uint8_t *old);
   int get_size(ImageCtx *ictx, uint64_t *size);
   int get_features(ImageCtx *ictx, uint64_t *features);
-  int update_features(ImageCtx *ictx, uint64_t features, bool enabled);
   int get_overlap(ImageCtx *ictx, uint64_t *overlap);
   int get_parent_info(ImageCtx *ictx, std::string *parent_pool_name,
 		      std::string *parent_name, std::string *parent_snap_name);
@@ -196,8 +195,6 @@ namespace librbd {
   int poll_io_events(ImageCtx *ictx, AioCompletion **comps, int numcomp);
   int metadata_list(ImageCtx *ictx, const string &last, uint64_t max, map<string, bufferlist> *pairs);
   int metadata_get(ImageCtx *ictx, const std::string &key, std::string *value);
-  int metadata_set(ImageCtx *ictx, const std::string &key, const std::string &value);
-  int metadata_remove(ImageCtx *ictx, const std::string &key);
 
   int mirror_mode_get(IoCtx& io_ctx, rbd_mirror_mode_t *mirror_mode);
   int mirror_mode_set(IoCtx& io_ctx, rbd_mirror_mode_t mirror_mode);
