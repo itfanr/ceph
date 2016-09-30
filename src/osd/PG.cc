@@ -4024,7 +4024,7 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
       case PG::Scrubber::INACTIVE:
         dout(10) << "scrub start" << dendl;
 
-	cleaned_meta_map.reset_bitwise(get_sort_bitwise());
+	scrubber.cleaned_meta_map.reset_bitwise(get_sort_bitwise());
 
         publish_stats_to_osd();
         scrubber.epoch_start = info.history.same_interval_since;
