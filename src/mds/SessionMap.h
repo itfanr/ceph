@@ -104,9 +104,7 @@ public:
 
   void push_pv(version_t pv)
   {
-    if (!projected.empty()) {
-      assert(projected.back() != pv);
-    }
+    assert(projected.empty() || projected.back() != pv);
     projected.push_back(pv);
   }
 
@@ -312,7 +310,7 @@ public:
   }
 
   int check_access(CInode *in, unsigned mask, int caller_uid, int caller_gid,
-		   int new_uid, int new_gid);
+		   const vector<uint64_t> *gid_list, int new_uid, int new_gid);
 
 
   Session() : 

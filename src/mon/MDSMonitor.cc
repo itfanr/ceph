@@ -1699,7 +1699,7 @@ int MDSMonitor::management_command(
     cmd_getval(g_ceph_context, cmdmap, "sure", sure);
     if (sure != "--yes-i-really-mean-it") {
       ss << "this is a DESTRUCTIVE operation and will make data in your filesystem permanently" \
-            "inaccessible.  Add --yes-i-really-mean-it if you are sure you wish to continue.";
+            " inaccessible.  Add --yes-i-really-mean-it if you are sure you wish to continue.";
       return -EPERM;
     }
 
@@ -2911,6 +2911,17 @@ bool MDSMonitor::maybe_promote_standby(std::shared_ptr<Filesystem> fs)
           info.standby_for_fscid == FS_CLUSTER_ID_NONE ?
             pending_fsmap.legacy_client_fscid : info.standby_for_fscid,
           info.standby_for_rank};
+
+        // It is possible that the map contains a standby_for_fscid
+        // that doesn't correspond to an existing filesystem, especially
+        // if we loaded from a version with a bug (#17466)
+        if (info.standby_for_fscid != FS_CLUSTER_ID_NONE
+            && pending_fsmap.get_filesystems().count(
+              info.standby_for_fscid) == 0) {
+          derr << "gid " << gid << " has invalid standby_for_fscid "
+               << info.standby_for_fscid << dendl;
+          continue;
+        }
 
         // If we managed to resolve a full target role
         if (target_role.fscid != FS_CLUSTER_ID_NONE) {

@@ -67,7 +67,7 @@
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mon, osdmap)
-static ostream& _prefix(std::ostream *_dout, Monitor *mon, OSDMap& osdmap) {
+static ostream& _prefix(std::ostream *_dout, Monitor *mon, const OSDMap& osdmap) {
   return *_dout << "mon." << mon->name << "@" << mon->rank
 		<< "(" << mon->get_state_name()
 		<< ").osd e" << osdmap.get_epoch() << " ";
@@ -4417,20 +4417,47 @@ int OSDMonitor::crush_rename_bucket(const string& srcname,
 
   pending_inc.crush.clear();
   newcrush.encode(pending_inc.crush);
-  *ss << "renamed bucket " << srcname << " into " << dstname;
+  *ss << "renamed bucket " << srcname << " into " << dstname;	
   return 0;
 }
 
-int OSDMonitor::normalize_profile(ErasureCodeProfile &profile, ostream *ss)
+void OSDMonitor::check_legacy_ec_plugin(const string& plugin, const string& profile) const
+{
+  string replacement = "";
+
+  if (plugin == "jerasure_generic" || 
+      plugin == "jerasure_sse3" ||
+      plugin == "jerasure_sse4" ||
+      plugin == "jerasure_neon") {
+    replacement = "jerasure";
+  } else if (plugin == "shec_generic" ||
+	     plugin == "shec_sse3" ||
+	     plugin == "shec_sse4" ||
+             plugin == "shec_neon") {
+    replacement = "shec";
+  }
+
+  if (replacement != "") {
+    dout(0) << "WARNING: erasure coding profile " << profile << " uses plugin "
+	    << plugin << " that has been deprecated. Please use " 
+	    << replacement << " instead." << dendl;
+  }
+}
+
+int OSDMonitor::normalize_profile(const string& profilename, 
+				  ErasureCodeProfile &profile, 
+				  ostream *ss)
 {
   ErasureCodeInterfaceRef erasure_code;
   ErasureCodePluginRegistry &instance = ErasureCodePluginRegistry::instance();
   ErasureCodeProfile::const_iterator plugin = profile.find("plugin");
+  check_legacy_ec_plugin(plugin->second, profilename);
   int err = instance.factory(plugin->second,
 			     g_conf->erasure_code_dir,
 			     profile, &erasure_code, ss);
   if (err)
     return err;
+
   return erasure_code->init(profile, ss);
 }
 
@@ -4487,6 +4514,7 @@ int OSDMonitor::get_erasure_code(const string &erasure_code_profile,
 	<< profile << std::endl;
     return -EINVAL;
   }
+  check_legacy_ec_plugin(plugin->second, erasure_code_profile);
   ErasureCodePluginRegistry &instance = ErasureCodePluginRegistry::instance();
   return instance.factory(plugin->second,
 			  g_conf->erasure_code_dir,
@@ -5129,10 +5157,9 @@ int OSDMonitor::prepare_command_pool_set(map<string,cmd_vartype> &cmdmap,
       ss << "splits in cache pools must be followed by scrubs and leave sufficient free space to avoid overfilling.  use --yes-i-really-mean-it to force.";
       return -EPERM;
     }
-    int expected_osds = MAX(1, MIN(p.get_pg_num(), osdmap.get_num_osds()));
+    int expected_osds = MIN(p.get_pg_num(), osdmap.get_num_osds());
     int64_t new_pgs = n - p.get_pg_num();
-    int64_t pgs_per_osd = new_pgs / expected_osds;
-    if (pgs_per_osd > g_conf->mon_osd_max_split_count) {
+    if (new_pgs > g_conf->mon_osd_max_split_count * expected_osds) {
       ss << "specified pg_num " << n << " is too large (creating "
 	 << new_pgs << " new PGs on ~" << expected_osds
 	 << " OSDs exceeds per-OSD max of " << g_conf->mon_osd_max_split_count
@@ -6157,14 +6184,14 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 	if (err)
 	  goto reply;
       }
-      err = normalize_profile(profile_map, &ss);
+      err = normalize_profile(name, profile_map, &ss);
       if (err)
 	goto reply;
 
       if (osdmap.has_erasure_code_profile(name)) {
 	ErasureCodeProfile existing_profile_map =
 	  osdmap.get_erasure_code_profile(name);
-	err = normalize_profile(existing_profile_map, &ss);
+	err = normalize_profile(name, existing_profile_map, &ss);
 	if (err)
 	  goto reply;
 
@@ -6218,7 +6245,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 						      &ss);
 	if (err)
 	  goto reply;
-	err = normalize_profile(profile_map, &ss);
+	err = normalize_profile(name, profile_map, &ss);
 	if (err)
 	  goto reply;
 	dout(20) << "erasure code profile set " << profile << "="

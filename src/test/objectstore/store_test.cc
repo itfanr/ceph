@@ -1363,6 +1363,8 @@ TEST_P(StoreTest, BluestoreStatFSTest) {
   ObjectStore::Sequencer osr("test");
   coll_t cid;
   ghobject_t hoid(hobject_t(sobject_t("Object 1", CEPH_NOSNAP)));
+  ghobject_t hoid2 = hoid;
+  hoid2.hobj.snap = 1;
   {
     bufferlist in;
     r = store->read(cid, hoid, 0, 5, in);
@@ -1435,9 +1437,9 @@ TEST_P(StoreTest, BluestoreStatFSTest) {
     int r = store->statfs(&statfs);
     ASSERT_EQ(r, 0);
     ASSERT_EQ(0x30005, statfs.stored);
-    ASSERT_EQ(0x20000, statfs.allocated);
+    ASSERT_EQ(0x30000, statfs.allocated);
     ASSERT_LE(statfs.compressed, 0x10000);
-    ASSERT_EQ(0x30000, statfs.compressed_original);
+    ASSERT_EQ(0x20000, statfs.compressed_original);
     ASSERT_EQ(statfs.compressed_allocated, 0x10000);
     //force fsck
     EXPECT_EQ(store->umount(), 0);
@@ -1455,9 +1457,9 @@ TEST_P(StoreTest, BluestoreStatFSTest) {
     int r = store->statfs(&statfs);
     ASSERT_EQ(r, 0);
     ASSERT_EQ(0x30005 - 3 - 9, statfs.stored);
-    ASSERT_EQ(0x20000, statfs.allocated);
+    ASSERT_EQ(0x30000, statfs.allocated);
     ASSERT_LE(statfs.compressed, 0x10000);
-    ASSERT_EQ(0x30000 - 9, statfs.compressed_original);
+    ASSERT_EQ(0x20000 - 9, statfs.compressed_original);
     ASSERT_EQ(statfs.compressed_allocated, 0x10000);
     //force fsck
     EXPECT_EQ(store->umount(), 0);
@@ -1478,9 +1480,9 @@ TEST_P(StoreTest, BluestoreStatFSTest) {
     int r = store->statfs(&statfs);
     ASSERT_EQ(r, 0);
     ASSERT_EQ(0x30001 - 9 + 0x1000, statfs.stored);
-    ASSERT_EQ(0x30000, statfs.allocated);
+    ASSERT_EQ(0x40000, statfs.allocated);
     ASSERT_LE(statfs.compressed, 0x10000);
-    ASSERT_EQ(0x30000 - 9 - 0x1000, statfs.compressed_original);
+    ASSERT_EQ(0x20000 - 9 - 0x1000, statfs.compressed_original);
     ASSERT_EQ(statfs.compressed_allocated, 0x10000);
     //force fsck
     EXPECT_EQ(store->umount(), 0);
@@ -1544,18 +1546,38 @@ TEST_P(StoreTest, BluestoreStatFSTest) {
     r = store->statfs(&statfs);
     ASSERT_EQ(r, 0);
     ASSERT_EQ(0x40000 - 2, statfs.stored);
-    ASSERT_EQ(0x20000, statfs.allocated);
+    ASSERT_EQ(0x30000, statfs.allocated);
     ASSERT_LE(statfs.compressed, 0x10000);
-    ASSERT_EQ(0x30000, statfs.compressed_original);
+    ASSERT_EQ(0x20000, statfs.compressed_original);
     ASSERT_EQ(0x10000, statfs.compressed_allocated);
     //force fsck
     EXPECT_EQ(store->umount(), 0);
     EXPECT_EQ(store->mount(), 0);
   }
+  {
+    struct store_statfs_t statfs;
+    r = store->statfs(&statfs);
+    ASSERT_EQ(r, 0);
+
+    ObjectStore::Transaction t;
+    t.clone(cid, hoid, hoid2);
+    cerr << "Clone compressed objecte" << std::endl;
+    r = apply_transaction(store, &osr, std::move(t));
+    ASSERT_EQ(r, 0);
+    struct store_statfs_t statfs2;
+    r = store->statfs(&statfs2);
+    ASSERT_EQ(r, 0);
+    ASSERT_GT(statfs2.stored, statfs.stored);
+    ASSERT_EQ(statfs2.allocated, statfs.allocated);
+    ASSERT_GT(statfs2.compressed, statfs.compressed);
+    ASSERT_GT(statfs2.compressed_original, statfs.compressed_original);
+    ASSERT_EQ(statfs2.compressed_allocated, statfs.compressed_allocated);
+  }
 
   {
     ObjectStore::Transaction t;
     t.remove(cid, hoid);
+    t.remove(cid, hoid2);
     t.remove_collection(cid);
     cerr << "Cleaning" << std::endl;
     r = apply_transaction(store, &osr, std::move(t));
@@ -3295,7 +3317,8 @@ public:
     }
     bufferptr bp(size);
     for (unsigned int i = 0; i < size - 1; i++) {
-      bp[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+      // severely limit entropy so we can compress...
+      bp[i] = alphanum[rand() % 10]; //(sizeof(alphanum) - 1)];
     }
     bp[size - 1] = '\0';
 
@@ -4184,6 +4207,8 @@ TEST_P(StoreTest, SyntheticMatrixSharding) {
     { "bluestore_extent_map_shard_min_size", "60", 0 },
     { "bluestore_extent_map_shard_max_size", "300", 0 },
     { "bluestore_extent_map_shard_target_size", "150", 0 },
+    { "bluestore_default_buffered_read", "true", 0 },
+    { "bluestore_default_buffered_write", "true", 0 },
     { 0 },
   };
   do_matrix(m, store);
@@ -4249,6 +4274,7 @@ TEST_P(StoreTest, SyntheticMatrixCsumAlgorithm) {
     { "bluestore_min_alloc_size", "65536", 0 },
     { "bluestore_csum_type", "crc32c", "crc32c_16", "crc32c_8", "xxhash32",
       "xxhash64", "none", 0 },
+    { "bluestore_default_buffered_write", "false", 0 },
     { 0 },
   };
   do_matrix(m, store);
@@ -4259,13 +4285,15 @@ TEST_P(StoreTest, SyntheticMatrixCsumVsCompression) {
     return;
 
   const char *m[][10] = {
-    { "max_write", "65536", 0 },
+    { "max_write", "131072", 0 },
     { "max_size", "262144", 0 },
     { "alignment", "512", 0 },
-    { "bluestore_min_alloc_size", "32768", "4096", 0 },
-    { "bluestore_compression", "force", "none", 0},
+    { "bluestore_min_alloc_size", "4096", "16384", 0 },
+    { "bluestore_compression", "force", 0},
+    { "bluestore_compression_algorithm", "snappy", "zlib", 0 },
     { "bluestore_csum_type", "crc32c", 0 },
     { "bluestore_default_buffered_read", "true", "false", 0 },
+    { "bluestore_default_buffered_write", "true", "false", 0 },
     { 0 },
   };
   do_matrix(m, store);
@@ -4281,6 +4309,7 @@ TEST_P(StoreTest, SyntheticMatrixCompression) {
     { "alignment", "65536", 0 },
     { "bluestore_min_alloc_size", "4096", "65536", 0 },
     { "bluestore_compression", "force", "aggressive", "passive", "none", 0},
+    { "bluestore_default_buffered_write", "false", 0 },
     { 0 },
   };
   do_matrix(m, store);
@@ -4296,6 +4325,7 @@ TEST_P(StoreTest, SyntheticMatrixCompressionAlgorithm) {
     { "alignment", "65536", 0 },
     { "bluestore_compression_algorithm", "zlib", "snappy", 0 },
     { "bluestore_compression", "force", 0 },
+    { "bluestore_default_buffered_write", "false", 0 },
     { 0 },
   };
   do_matrix(m, store);
@@ -4314,6 +4344,7 @@ TEST_P(StoreTest, SyntheticMatrixNoCsum) {
     { "bluestore_compression", "force", "none", 0},
     { "bluestore_csum_type", "none", 0},
     { "bluestore_default_buffered_read", "true", "false", 0 },
+    { "bluestore_default_buffered_write", "true", 0 },
     { 0 },
   };
   do_matrix(m, store);

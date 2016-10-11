@@ -84,6 +84,7 @@ void FSMap::print(ostream& out) const
   out << "enable_multiple, ever_enabled_multiple: " << enable_multiple << ","
       << ever_enabled_multiple << std::endl;
   out << "compat: " << compat << std::endl;
+  out << "legacy client fscid: " << legacy_client_fscid << std::endl;
   out << " " << std::endl;
 
   if (filesystems.empty()) {
@@ -654,7 +655,7 @@ void FSMap::sanity() const
 
 void FSMap::promote(
     mds_gid_t standby_gid,
-    std::shared_ptr<Filesystem> filesystem,
+    const std::shared_ptr<Filesystem> &filesystem,
     mds_rank_t assigned_rank)
 {
   assert(gid_exists(standby_gid));

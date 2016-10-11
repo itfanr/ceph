@@ -527,22 +527,10 @@ void dump_epoch_header(struct req_state *s, const char *name, real_time t)
 
 void dump_time(struct req_state *s, const char *name, real_time *t)
 {
-  utime_t ut(*t);
-
   char buf[TIME_BUF_SIZE];
-  struct tm result;
-  time_t epoch = ut.sec();
-  struct tm *tmp = gmtime_r(&epoch, &result);
-  if (tmp == NULL)
-    return;
+  rgw_to_iso8601(*t, buf, sizeof(buf));
 
-  if (strftime(buf, sizeof(buf), "%Y-%m-%dT%T", tmp) == 0)
-    return;
-
-  char buf2[TIME_BUF_SIZE];
-  snprintf(buf2, sizeof(buf2), "%s.%03dZ", buf, (int)(ut.usec() / 1000));
-
-  s->formatter->dump_string(name, buf2);
+  s->formatter->dump_string(name, buf);
 }
 
 void dump_owner(struct req_state *s, rgw_user& id, string& name,
@@ -611,7 +599,7 @@ void dump_trans_id(req_state *s)
   if (s->prot_flags & RGW_REST_SWIFT) {
     STREAM_IO(s)->print("X-Trans-Id: %s\r\n", s->trans_id.c_str());
   }
-  else {
+  else if (s->trans_id.length()) {
     STREAM_IO(s)->print("x-amz-request-id: %s\r\n", s->trans_id.c_str());
   }
 }
@@ -816,6 +804,8 @@ int RGWGetObj_ObjStore::get_params()
   if (s->system_request) {
     mod_zone_id = s->info.env->get_int("HTTP_DEST_ZONE_SHORT_ID", 0);
     mod_pg_ver = s->info.env->get_int("HTTP_DEST_PG_VER", 0);
+    rgwx_stat = s->info.args.exists(RGW_SYS_PARAM_PREFIX "stat");
+    get_data &= (!rgwx_stat);
   }
 
   /* start gettorrent */
@@ -1212,8 +1202,8 @@ int RGWPutLC_ObjStore::get_params()
   if (cl) {
     data = (char *)malloc(cl + 1);
     if (!data) {
-       ret = -ENOMEM;
-       return ret;
+       op_ret = -ENOMEM;
+       return op_ret;
     }
     int read_len;
     int r = STREAM_IO(s)->read(data, cl, &read_len, s->aws4_auth_needs_complete);
@@ -1225,7 +1215,7 @@ int RGWPutLC_ObjStore::get_params()
     len = 0;
   }
 
-  return ret;
+  return op_ret;
 }
 
 static int read_all_chunked_input(req_state *s, char **pdata, int *plen, int max_read)

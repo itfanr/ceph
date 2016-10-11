@@ -133,6 +133,7 @@ protected:
   utime_t gc_invalidate_time;
   bool is_slo;
   string lo_etag;
+  bool rgwx_stat; /* extended rgw stat operation */
 
   int init_common();
 public:
@@ -155,6 +156,7 @@ public:
     range_parsed = false;
     skip_manifest = false;
     is_slo = false;
+    rgwx_stat = false;
  }
 
   bool prefetch_data();
@@ -1012,10 +1014,9 @@ public:
 
 class RGWGetLC : public RGWOp {
 protected:
-  int ret;
-
+    
 public:
-  RGWGetLC() : ret(0) { }
+  RGWGetLC() { }
   virtual ~RGWGetLC() { }
 
   int verify_permission();
@@ -1029,14 +1030,12 @@ public:
 
 class RGWPutLC : public RGWOp {
 protected:
-  int ret;
   size_t len;
   char *data;
   string cookie;
 
 public:
   RGWPutLC() {
-    ret = 0;
     len = 0;
     data = NULL;
   }
@@ -1066,13 +1065,11 @@ public:
 
 class RGWDeleteLC : public RGWOp {
 protected:
-  int ret;
   size_t len;
   char *data;
 
 public:
   RGWDeleteLC() {
-    ret = 0;
     len = 0;
     data = NULL;
   }

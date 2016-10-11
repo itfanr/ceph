@@ -97,6 +97,8 @@ OPTION(xio_max_conns_per_portal, OPT_INT, 32) // max xio_connections per portal/
 OPTION(xio_transport_type, OPT_STR, "rdma") // xio transport type: {rdma or tcp}
 OPTION(xio_max_send_inline, OPT_INT, 512) // xio maximum threshold to send inline
 
+OPTION(compressor_zlib_isal, OPT_BOOL, false)
+
 OPTION(async_compressor_enabled, OPT_BOOL, false)
 OPTION(async_compressor_type, OPT_STR, "snappy")
 OPTION(async_compressor_threads, OPT_INT, 2)
@@ -416,6 +418,7 @@ OPTION(fuse_debug, OPT_BOOL, false)
 OPTION(fuse_multithreaded, OPT_BOOL, true)
 OPTION(fuse_require_active_mds, OPT_BOOL, true) // if ceph_fuse requires active mds server
 OPTION(fuse_syncfs_on_mksnap, OPT_BOOL, true)
+OPTION(fuse_set_user_groups, OPT_BOOL, false) // if ceph_fuse fills in group lists or not
 
 OPTION(client_try_dentry_invalidate, OPT_BOOL, true) // the client should try to use dentry invaldation instead of remounting, on kernels it believes that will work for
 OPTION(client_die_on_failed_remount, OPT_BOOL, true)
@@ -990,7 +993,7 @@ OPTION(bluestore_extent_map_shard_min_size, OPT_U32, 150)
 OPTION(bluestore_extent_map_shard_target_size_slop, OPT_DOUBLE, .2)
 OPTION(bluestore_extent_map_inline_shard_prealloc_size, OPT_U32, 256)
 OPTION(bluestore_cache_type, OPT_STR, "2q")   // lru, 2q
-OPTION(bluestore_onode_cache_size, OPT_U32, 16*1024)
+OPTION(bluestore_onode_cache_size, OPT_U32, 4*1024)
 OPTION(bluestore_buffer_cache_size, OPT_U32, 512*1024*1024)
 OPTION(bluestore_shared_blob_hash_table_size_ratio, OPT_FLOAT, 2)  // multiple of onode_cache_size
 OPTION(bluestore_kvbackend, OPT_STR, "rocksdb")
@@ -1019,6 +1022,7 @@ OPTION(bluestore_overlay_max_length, OPT_INT, 65536)
 OPTION(bluestore_overlay_max, OPT_INT, 0)
 OPTION(bluestore_clone_cow, OPT_BOOL, false)  // do copy-on-write for clones
 OPTION(bluestore_default_buffered_read, OPT_BOOL, true)
+OPTION(bluestore_default_buffered_write, OPT_BOOL, false)
 OPTION(bluestore_debug_misc, OPT_BOOL, false)
 OPTION(bluestore_debug_no_reuse_blocks, OPT_BOOL, false)
 OPTION(bluestore_debug_small_allocations, OPT_INT, 0)
@@ -1256,7 +1260,8 @@ OPTION(rbd_default_features, OPT_INT, 61)   // only applies to format 2 images
 					    // +1 for layering, +2 for stripingv2,
 					    // +4 for exclusive lock, +8 for object map
 					    // +16 for fast-diff, +32 for deep-flatten,
-					    // +64 for journaling
+					    // +64 for journaling, +128 for data pool
+OPTION(rbd_default_data_pool, OPT_STR, "") // optional default pool for storing image data blocks
 
 OPTION(rbd_default_map_options, OPT_STR, "") // default rbd map -o / --options
 
@@ -1495,6 +1500,7 @@ OPTION(rgw_num_async_rados_threads, OPT_INT, 32) // num of threads to use for as
 OPTION(rgw_md_notify_interval_msec, OPT_INT, 200) // metadata changes notification interval to followers
 OPTION(rgw_run_sync_thread, OPT_BOOL, true) // whether radosgw (not radosgw-admin) spawns the sync thread
 OPTION(rgw_sync_lease_period, OPT_INT, 120) // time in second for lease that rgw takes on a specific log (or log shard)
+OPTION(rgw_sync_log_trim_interval, OPT_INT, 1200) // time in seconds between attempts to trim sync logs
 
 OPTION(rgw_sync_data_inject_err_probability, OPT_DOUBLE, 0) // range [0, 1]
 OPTION(rgw_sync_meta_inject_err_probability, OPT_DOUBLE, 0) // range [0, 1]
@@ -1512,6 +1518,8 @@ OPTION(mgr_beacon_period, OPT_INT, 5)  // How frequently to send beacon
 OPTION(mon_mgr_beacon_grace, OPT_INT, 30)  // How long to wait to failover
 
 OPTION(rgw_list_bucket_min_readahead, OPT_INT, 1000) // minimum number of entries to read from rados for bucket listing
+
+OPTION(rgw_rest_getusage_op_compat, OPT_BOOL, false) // dump description of total stats for s3 GetUsage API
 
 OPTION(mutex_perf_counter, OPT_BOOL, false) // enable/disable mutex perf counter
 OPTION(throttler_perf_counter, OPT_BOOL, true) // enable/disable throttler perf counter

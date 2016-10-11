@@ -45,6 +45,9 @@
 
 #include "rgw_coroutine.h"
 
+#include "rgw_boost_asio_yield.h"
+#undef fork // fails to compile RGWPeriod::fork() below
+
 #include "common/Clock.h"
 
 #include "include/rados/librados.hpp"
@@ -244,7 +247,9 @@ int RGWZoneGroup::equals(const string& other_zonegroup) const
   return (id  == other_zonegroup);
 }
 
-int RGWZoneGroup::add_zone(const RGWZoneParams& zone_params, bool *is_master, bool *read_only, const list<string>& endpoints)
+int RGWZoneGroup::add_zone(const RGWZoneParams& zone_params, bool *is_master, bool *read_only,
+                           const list<string>& endpoints, const string *ptier_type,
+                           bool *psync_from_all, list<string>& sync_from, list<string>& sync_from_rm)
 {
   auto& zone_id = zone_params.get_id();
   auto& zone_name = zone_params.get_name();
@@ -279,6 +284,21 @@ int RGWZoneGroup::add_zone(const RGWZoneParams& zone_params, bool *is_master, bo
   }
   if (read_only) {
     zone.read_only = *read_only;
+  }
+  if (ptier_type) {
+    zone.tier_type = *ptier_type;
+  }
+
+  if (psync_from_all) {
+    zone.sync_from_all = *psync_from_all;
+  }
+
+  for (auto add : sync_from) {
+    zone.sync_from.insert(add);
+  }
+
+  for (auto rm : sync_from_rm) {
+    zone.sync_from.erase(rm);
   }
 
   post_process_params();
@@ -1955,6 +1975,9 @@ int RGWObjManifest::generator::create_begin(CephContext *cct, RGWObjManifest *_m
 
   manifest->get_implicit_location(cur_part_id, cur_stripe, 0, NULL, &cur_obj);
 
+  // Normal object which not generated through copy operation 
+  manifest->set_tail_instance(_h.get_instance());
+
   manifest->update_iterators();
 
   return 0;
@@ -2940,7 +2963,7 @@ int RGWDataNotifier::process()
     ldout(cct, 20) << __func__ << "(): notifying datalog change, shard_id=" << iter->first << ": " << iter->second << dendl;
   }
 
-  notify_mgr.notify_all(store->zone_conn_map, shards);
+  notify_mgr.notify_all(store->zone_data_notify_to_map, shards);
 
   return 0;
 }
@@ -2972,6 +2995,7 @@ public:
       sync.wakeup(*iter);
     }
   }
+  RGWMetaSyncStatusManager* get_manager() { return &sync; }
 
   int init() {
     int ret = sync.init();
@@ -3015,7 +3039,7 @@ public:
       sync.wakeup(iter->first, iter->second);
     }
   }
-
+  RGWDataSyncStatusManager* get_manager() { return &sync; }
 
   int init() {
     return 0;
@@ -3035,6 +3059,33 @@ public:
       return 0;
     }
     sync.run();
+    return 0;
+  }
+};
+
+class RGWSyncLogTrimThread : public RGWSyncProcessorThread
+{
+  RGWCoroutinesManager crs;
+  RGWRados *store;
+  RGWHTTPManager http;
+  const utime_t trim_interval;
+
+  uint64_t interval_msec() override { return 0; }
+  void stop_process() override { crs.stop(); }
+public:
+  RGWSyncLogTrimThread(RGWRados *store, int interval)
+    : RGWSyncProcessorThread(store), crs(store->ctx(), nullptr), store(store),
+      http(store->ctx(), crs.get_completion_mgr()),
+      trim_interval(interval, 0)
+  {}
+
+  int init() override {
+    return http.set_threaded();
+  }
+  int process() override {
+    crs.run(new RGWDataLogTrimCR(store, &http,
+                                 cct->_conf->rgw_data_log_num_shards,
+                                 trim_interval));
     return 0;
   }
 };
@@ -3060,6 +3111,25 @@ void RGWRados::wakeup_data_sync_shards(const string& source_zone, map<int, set<s
   RGWDataSyncProcessorThread *thread = iter->second;
   assert(thread);
   thread->wakeup_sync_shards(shard_ids);
+}
+
+RGWMetaSyncStatusManager* RGWRados::get_meta_sync_manager()
+{
+  Mutex::Locker l(meta_sync_thread_lock);
+  if (meta_sync_processor_thread) {
+    return meta_sync_processor_thread->get_manager();
+  }
+  return nullptr;
+}
+
+RGWDataSyncStatusManager* RGWRados::get_data_sync_manager(const std::string& source_zone)
+{
+  Mutex::Locker l(data_sync_thread_lock);
+  auto thread = data_sync_processor_threads.find(source_zone);
+  if (thread == data_sync_processor_threads.end()) {
+    return nullptr;
+  }
+  return thread->second->get_manager();
 }
 
 int RGWRados::get_required_alignment(rgw_bucket& bucket, uint64_t *alignment)
@@ -3136,6 +3206,9 @@ void RGWRados::finalize()
       RGWDataSyncProcessorThread *thread = iter.second;
       thread->stop();
     }
+    if (sync_log_trimmer) {
+      sync_log_trimmer->stop();
+    }
   }
   if (async_rados) {
     async_rados->stop();
@@ -3149,6 +3222,8 @@ void RGWRados::finalize()
       delete thread;
     }
     data_sync_processor_threads.clear();
+    delete sync_log_trimmer;
+    sync_log_trimmer = nullptr;
   }
   if (finisher) {
     finisher->stop();
@@ -3210,6 +3285,7 @@ void RGWRados::finalize()
   delete meta_mgr;
   delete binfo_cache;
   delete obj_tombstone_cache;
+  delete sync_modules_manager;
 }
 
 /** 
@@ -3232,6 +3308,10 @@ int RGWRados::init_rados()
       return ret;
     }
   }
+
+  sync_modules_manager = new RGWSyncModulesManager();
+
+  rgw_register_sync_modules(sync_modules_manager);
 
   auto crs = std::unique_ptr<RGWCoroutinesManagerRegistry>{
     new RGWCoroutinesManagerRegistry(cct)};
@@ -3639,6 +3719,13 @@ int RGWRados::init_zg_from_local(bool *creating_defaults)
   return 0;
 }
 
+
+bool RGWRados::zone_syncs_from(RGWZone& target_zone, RGWZone& source_zone)
+{
+  return target_zone.syncs_from(source_zone.name) &&
+         sync_modules_manager->supports_data_export(source_zone.tier_type);
+}
+
 /** 
  * Initialize the RADOS instance and prepare to do other ops
  * Returns 0 on success, -ERR# on failure.
@@ -3724,6 +3811,14 @@ int RGWRados::init_complete()
 
   zone_short_id = current_period.get_map().get_zone_short_id(zone_params.get_id());
 
+  ret = sync_modules_manager->create_instance(cct, zone_public_config.tier_type, zone_params.tier_config, &sync_module);
+  if (ret < 0) {
+    lderr(cct) << "ERROR: failed to init sync module instance, ret=" << ret << dendl;
+    return ret;
+  }
+
+  writeable_zone = (zone_public_config.tier_type.empty() || zone_public_config.tier_type == "rgw");
+
   init_unique_trans_id_deps();
 
   finisher = new Finisher(cct);
@@ -3741,22 +3836,41 @@ int RGWRados::init_complete()
     }
   }
 
-  map<string, RGWZone>::iterator ziter;
-  for (ziter = get_zonegroup().zones.begin(); ziter != get_zonegroup().zones.end(); ++ziter) {
-    const string& id = ziter->first;
-    RGWZone& z = ziter->second;
+  /* first build all zones index */
+  for (auto ziter : get_zonegroup().zones) {
+    const string& id = ziter.first;
+    RGWZone& z = ziter.second;
     zone_id_by_name[z.name] = id;
-    zone_name_by_id[id] = z.name;
-    if (id != zone_id()) {
-      if (!z.endpoints.empty()) {
-        ldout(cct, 20) << "generating connection object for zone " << z.name << " id " << z.id << dendl;
-        RGWRESTConn *conn = new RGWRESTConn(cct, this, z.id, z.endpoints);
-        zone_conn_map[id] = conn;
-      } else {
-        ldout(cct, 0) << "WARNING: can't generate connection for zone " << z.id << " id " << z.name << ": no endpoints defined" << dendl;
+    zone_by_id[id] = z;
+  }
+  
+  if (zone_by_id.find(zone_id()) == zone_by_id.end()) {
+    ldout(cct, 0) << "WARNING: could not find zone config in zonegroup for local zone (" << zone_id() << "), will use defaults" << dendl;
+  }
+  zone_public_config = zone_by_id[zone_id()];
+  for (auto ziter : get_zonegroup().zones) {
+    const string& id = ziter.first;
+    RGWZone& z = ziter.second;
+    if (id == zone_id()) {
+      continue;
+    }
+    if (z.endpoints.empty()) {
+      ldout(cct, 0) << "WARNING: can't generate connection for zone " << z.id << " id " << z.name << ": no endpoints defined" << dendl;
+      continue;
+    }
+    ldout(cct, 20) << "generating connection object for zone " << z.name << " id " << z.id << dendl;
+    RGWRESTConn *conn = new RGWRESTConn(cct, this, z.id, z.endpoints);
+    zone_conn_map[id] = conn;
+    if (zone_syncs_from(zone_public_config, z) ||
+        zone_syncs_from(z, zone_public_config)) {
+      if (zone_syncs_from(zone_public_config, z)) {
+        zone_data_sync_from_map[id] = conn;
+      }
+      if (zone_syncs_from(z, zone_public_config)) {
+        zone_data_notify_to_map[id] = conn;
       }
     } else {
-      zone_public_config = z;
+      ldout(cct, 20) << "NOTICE: not syncing to/from zone " << z.name << " id " << z.id << dendl;
     }
   }
 
@@ -3788,7 +3902,14 @@ int RGWRados::init_complete()
     obj_expirer->start_processor();
   }
 
-  /* not point of running sync thread if  we don't have a master zone configured 
+  if (run_sync_thread) {
+    // initialize the log period history. we want to do this any time we're not
+    // running under radosgw-admin, so we check run_sync_thread here before
+    // disabling it based on the zone/zonegroup setup
+    meta_mgr->init_oldest_log_period();
+  }
+
+  /* no point of running sync thread if we don't have a master zone configured
     or there is no rest_master_conn */
   if (get_zonegroup().master_zone.empty() || !rest_master_conn) {
     run_sync_thread = false;
@@ -3815,22 +3936,32 @@ int RGWRados::init_complete()
     meta_sync_processor_thread = new RGWMetaSyncProcessorThread(this, async_rados);
     ret = meta_sync_processor_thread->init();
     if (ret < 0) {
-      ldout(cct, 0) << "ERROR: failed to initialize" << dendl;
+      ldout(cct, 0) << "ERROR: failed to initialize meta sync thread" << dendl;
       return ret;
     }
     meta_sync_processor_thread->start();
 
     Mutex::Locker dl(data_sync_thread_lock);
-    for (map<string, RGWRESTConn *>::iterator iter = zone_conn_map.begin(); iter != zone_conn_map.end(); ++iter) {
-      ldout(cct, 5) << "starting data sync thread for zone " << iter->first << dendl;
-      RGWDataSyncProcessorThread *thread = new RGWDataSyncProcessorThread(this, async_rados, iter->first);
+    for (auto iter : zone_data_sync_from_map) {
+      ldout(cct, 5) << "starting data sync thread for zone " << iter.first << dendl;
+      RGWDataSyncProcessorThread *thread = new RGWDataSyncProcessorThread(this, async_rados, iter.first);
       ret = thread->init();
       if (ret < 0) {
-        ldout(cct, 0) << "ERROR: failed to initialize" << dendl;
+        ldout(cct, 0) << "ERROR: failed to initialize data sync thread" << dendl;
         return ret;
       }
       thread->start();
-      data_sync_processor_threads[iter->first] = thread;
+      data_sync_processor_threads[iter.first] = thread;
+    }
+    auto interval = cct->_conf->rgw_sync_log_trim_interval;
+    if (interval > 0) {
+      sync_log_trimmer = new RGWSyncLogTrimThread(this, interval);
+      ret = sync_log_trimmer->init();
+      if (ret < 0) {
+        ldout(cct, 0) << "ERROR: failed to initialize sync log trim thread" << dendl;
+        return ret;
+      }
+      sync_log_trimmer->start();
     }
   }
   data_notifier = new RGWDataNotifier(this);
@@ -3856,7 +3987,7 @@ int RGWRados::init_complete()
   binfo_cache = new RGWChainedCacheImpl<bucket_info_entry>;
   binfo_cache->init(this);
 
-  bool need_tombstone_cache = !zone_conn_map.empty();
+  bool need_tombstone_cache = !zone_data_notify_to_map.empty(); /* have zones syncing from us */
 
   if (need_tombstone_cache) {
     obj_tombstone_cache = new tombstone_cache_t(cct->_conf->rgw_obj_tombstone_cache_size);
@@ -4663,7 +4794,8 @@ int RGWRados::time_log_info_async(librados::IoCtx& io_ctx, const string& oid, cl
 }
 
 int RGWRados::time_log_trim(const string& oid, const real_time& start_time, const real_time& end_time,
-			    const string& from_marker, const string& to_marker)
+			    const string& from_marker, const string& to_marker,
+                            librados::AioCompletion *completion)
 {
   librados::IoCtx io_ctx;
 
@@ -4676,7 +4808,15 @@ int RGWRados::time_log_trim(const string& oid, const real_time& start_time, cons
   utime_t st(start_time);
   utime_t et(end_time);
 
-  return cls_log_trim(io_ctx, oid, st, et, from_marker, to_marker);
+  ObjectWriteOperation op;
+  cls_log_trim(op, st, et, from_marker, to_marker);
+
+  if (!completion) {
+    r = io_ctx.operate(oid, &op);
+  } else {
+    r = io_ctx.aio_operate(oid, completion, &op);
+  }
+  return r;
 }
 
 string RGWRados::objexp_hint_get_shardname(int shard_num)
@@ -4749,7 +4889,7 @@ int RGWRados::objexp_hint_list(const string& oid,
 {
   librados::ObjectReadOperation op;
   cls_timeindex_list(op, utime_t(start_time), utime_t(end_time), marker, max_entries, entries,
-	       out_marker, truncated);
+        out_marker, truncated);
 
   bufferlist obl;
   int ret = objexp_pool_ctx.operate(oid, &op, &obl);
@@ -4933,12 +5073,8 @@ int RGWRados::Bucket::List::list_objects(int max, vector<RGWObjEnt> *result,
     buf[r] = '\0';
 
     bigger_than_delim = buf;
-  }
 
-  string skip_after_delim;
-
-  /* if marker points at a common prefix, fast forward it into its upperbound string */
-  if (!params.delim.empty()) {
+    /* if marker points at a common prefix, fast forward it into its upperbound string */
     int delim_pos = cur_marker.name.find(params.delim, params.prefix.size());
     if (delim_pos >= 0) {
       string s = cur_marker.name.substr(0, delim_pos);
@@ -4946,7 +5082,8 @@ int RGWRados::Bucket::List::list_objects(int max, vector<RGWObjEnt> *result,
       cur_marker.set(s);
     }
   }
-
+  
+  string skip_after_delim;
   while (truncated && count <= max) {
     if (skip_after_delim > cur_marker.name) {
       cur_marker.set(skip_after_delim);
@@ -6642,6 +6779,130 @@ inline ostream& operator<<(ostream& out, const obj_time_weight &o) {
   return out;
 }
 
+class RGWGetExtraDataCB : public RGWGetDataCB {
+  bufferlist extra_data;
+public:
+  RGWGetExtraDataCB() {}
+  int handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len) {
+    if (extra_data.length() < extra_data_len) {
+      off_t max = extra_data_len - extra_data.length();
+      if (max > bl_len) {
+        max = bl_len;
+      }
+      bl.splice(0, max, &extra_data);
+    }
+    return bl_len;
+  }
+
+  bufferlist& get_extra_data() {
+    return extra_data;
+  }
+};
+
+int RGWRados::stat_remote_obj(RGWObjectCtx& obj_ctx,
+               const rgw_user& user_id,
+               const string& client_id,
+               req_info *info,
+               const string& source_zone,
+               rgw_obj& src_obj,
+               RGWBucketInfo& src_bucket_info,
+               real_time *src_mtime,
+               uint64_t *psize,
+               const real_time *mod_ptr,
+               const real_time *unmod_ptr,
+               bool high_precision_time,
+               const char *if_match,
+               const char *if_nomatch,
+               map<string, bufferlist> *pattrs,
+               string *version_id,
+               string *ptag,
+               string *petag)
+{
+  /* source is in a different zonegroup, copy from there */
+
+  RGWRESTStreamRWRequest *in_stream_req;
+  string tag;
+  map<string, bufferlist> src_attrs;
+  append_rand_alpha(cct, tag, tag, 32);
+  obj_time_weight set_mtime_weight;
+  set_mtime_weight.high_precision = high_precision_time;
+
+  RGWRESTConn *conn;
+  if (source_zone.empty()) {
+    if (src_bucket_info.zonegroup.empty()) {
+      /* source is in the master zonegroup */
+      conn = rest_master_conn;
+    } else {
+      map<string, RGWRESTConn *>::iterator iter = zonegroup_conn_map.find(src_bucket_info.zonegroup);
+      if (iter == zonegroup_conn_map.end()) {
+        ldout(cct, 0) << "could not find zonegroup connection to zonegroup: " << source_zone << dendl;
+        return -ENOENT;
+      }
+      conn = iter->second;
+    }
+  } else {
+    map<string, RGWRESTConn *>::iterator iter = zone_conn_map.find(source_zone);
+    if (iter == zone_conn_map.end()) {
+      ldout(cct, 0) << "could not find zone connection to zone: " << source_zone << dendl;
+      return -ENOENT;
+    }
+    conn = iter->second;
+  }
+
+  RGWGetExtraDataCB cb;
+  string etag;
+  map<string, string> req_headers;
+  real_time set_mtime;
+
+  const real_time *pmod = mod_ptr;
+
+  obj_time_weight dest_mtime_weight;
+
+  int ret = conn->get_obj(user_id, info, src_obj, pmod, unmod_ptr,
+                      dest_mtime_weight.zone_short_id, dest_mtime_weight.pg_ver,
+                      true /* prepend_meta */, true /* GET */, true /* rgwx-stat */,
+                      &cb, &in_stream_req);
+  if (ret < 0) {
+    return ret;
+  }
+
+  ret = conn->complete_request(in_stream_req, etag, &set_mtime, psize, req_headers);
+  if (ret < 0) {
+    return ret;
+  }
+
+  bufferlist& extra_data_bl = cb.get_extra_data();
+  if (extra_data_bl.length()) {
+    JSONParser jp;
+    if (!jp.parse(extra_data_bl.c_str(), extra_data_bl.length())) {
+      ldout(cct, 0) << "failed to parse response extra data. len=" << extra_data_bl.length() << " data=" << extra_data_bl.c_str() << dendl;
+      return -EIO;
+    }
+
+    JSONDecoder::decode_json("attrs", src_attrs, &jp);
+
+    src_attrs.erase(RGW_ATTR_MANIFEST); // not interested in original object layout
+  }
+
+  if (src_mtime) {
+    *src_mtime = set_mtime;
+  }
+
+  if (petag) {
+    map<string, bufferlist>::iterator iter = src_attrs.find(RGW_ATTR_ETAG);
+    if (iter != src_attrs.end()) {
+      bufferlist& etagbl = iter->second;
+      *petag = etagbl.to_str();
+    }
+  }
+
+  if (pattrs) {
+    *pattrs = src_attrs;
+  }
+
+  return 0;
+}
+
 int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
                const rgw_user& user_id,
                const string& client_id,
@@ -6675,7 +6936,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
 {
   /* source is in a different zonegroup, copy from there */
 
-  RGWRESTStreamReadRequest *in_stream_req;
+  RGWRESTStreamRWRequest *in_stream_req;
   string tag;
   map<string, bufferlist> src_attrs;
   int i;
@@ -6759,12 +7020,13 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
  
   ret = conn->get_obj(user_id, info, src_obj, pmod, unmod_ptr,
                       dest_mtime_weight.zone_short_id, dest_mtime_weight.pg_ver,
-                      true, &cb, &in_stream_req);
+                      true /* prepend_meta */, true /* GET */, false /* rgwx-stat */,
+                      &cb, &in_stream_req);
   if (ret < 0) {
     goto set_err_state;
   }
 
-  ret = conn->complete_request(in_stream_req, etag, &set_mtime, req_headers);
+  ret = conn->complete_request(in_stream_req, etag, &set_mtime, nullptr, req_headers);
   if (ret < 0) {
     goto set_err_state;
   }
@@ -7026,7 +7288,8 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
 
   RGWObjManifest manifest;
   RGWObjState *astate = NULL;
-  ret = get_obj_state(&obj_ctx, src_obj, &astate, NULL);
+
+  ret = get_obj_state(&obj_ctx, src_obj, &astate);
   if (ret < 0) {
     return ret;
   }
@@ -7455,9 +7718,7 @@ int RGWRados::Object::complete_atomic_modification()
   store->update_gc_chain(obj, state->manifest, &chain);
 
   string tag = state->obj_tag.to_str();
-  int ret = store->gc->send_chain(chain, tag, false);  // do it async
-
-  return ret;
+  return store->gc->send_chain(chain, tag, false);  // do it async
 }
 
 void RGWRados::update_gc_chain(rgw_obj& head_obj, RGWObjManifest& manifest, cls_rgw_obj_chain *chain)
