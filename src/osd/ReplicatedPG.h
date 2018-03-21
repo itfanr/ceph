@@ -331,6 +331,8 @@ public:
   void queue_transaction(ObjectStore::Transaction&& t, OpRequestRef op) {
     osd->store->queue_transaction(osr.get(), std::move(t), 0, 0, 0, op);
   }
+  //itfanr
+  //关键函数
   void queue_transactions(vector<ObjectStore::Transaction>& tls, OpRequestRef op) {
     osd->store->queue_transactions(osr.get(), tls, 0, 0, 0, op, NULL);
   }

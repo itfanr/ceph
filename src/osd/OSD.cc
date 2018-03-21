@@ -8511,6 +8511,10 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
   if (pg) {
     op->send_map_update = share_map.should_send;
     op->sent_epoch = m->get_map_epoch();
+  	//itfanr
+  	//找到PG以后，这时将这个op交给PG进行继续处理。
+  	//已经从OSD处理的message转化为了PG处理的op。
+  	//最终添加到OSDService->op_wq队列
     enqueue_op(pg, op);
     share_map.should_send = false;
     return;
@@ -8630,6 +8634,9 @@ void OSD::enqueue_op(PG *pg, OpRequestRef& op)
   pg->queue_op(op);
 }
 
+//itfanr
+//调用到OSD::dequeue_op()、pg->do_request()、
+//ReplicatedPG::do_request()、ReplicatedPG::do_op()
 void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb ) {
 
   uint32_t shard_index = thread_index % num_shards;

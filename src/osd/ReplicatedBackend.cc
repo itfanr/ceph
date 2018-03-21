@@ -564,6 +564,11 @@ void ReplicatedBackend::submit_transaction(
   assert(t->get_temp_cleared().size() <= 1);
 
   assert(!in_progress_ops.count(tid));
+  //itfanr
+  /*
+  开始准备一个处理操作的结构InProgressOp，
+  然后将申请的on_all_commit、on_all_applied等回调操作进行统计。
+  */
   InProgressOp &op = in_progress_ops.insert(
     make_pair(
       tid,
@@ -572,15 +577,21 @@ void ReplicatedBackend::submit_transaction(
 	orig_op, at_version)
       )
     ).first->second;
-
+	/*
+	开始统计所有需要applied的副本操作数量，
+	等待副本操作完成回调时进行清除，
+	使用该结构方便统计是不是所有的副本都完成了操作。
+	*/
   op.waiting_for_applied.insert(
     parent->get_actingbackfill_shards().begin(),
     parent->get_actingbackfill_shards().end());
+	//统计commit的副本操作数量
   op.waiting_for_commit.insert(
     parent->get_actingbackfill_shards().begin(),
     parent->get_actingbackfill_shards().end());
 
-
+//issue_op将ops的信息封装成message发送给replica osd副本的。
+//这个操作就是在封装message
   issue_op(
     soid,
     at_version,
@@ -600,7 +611,7 @@ void ReplicatedBackend::submit_transaction(
     add_temp_objs(t->get_temp_added());
   }
   clear_temp_objs(t->get_temp_cleared());
-
+//开始记录本端操作object的log。这个log对于数据的恢复存在至关重要的决定。
   parent->log_operation(
     log_entries,
     hset_history,
@@ -608,21 +619,30 @@ void ReplicatedBackend::submit_transaction(
     trim_rollback_to,
     true,
     op_t);
-  
+  //开始统计本端的sync回调，主要用于快照和克隆等等的数据同步。
   op_t.register_on_applied_sync(on_local_applied_sync);
+  //开始注册本端的applied回调函数，这里回调后会直接向上回调all_applied()
   op_t.register_on_applied(
     parent->bless_context(
       new C_OSD_OnOpApplied(this, &op)));
+  //开始注册本端的commit回调函数，这里回调后直接向上回调all_commited()。
   op_t.register_on_commit(
     parent->bless_context(
       new C_OSD_OnOpCommit(this, &op)));
 
   vector<ObjectStore::Transaction> tls;
   tls.push_back(std::move(op_t));
-
+//本端开始真正的处理请求
+//这个parent指的就是ReplicaPG -> queue_transaction,
+//然后在进行最后osd->store->queue_transaction ，
+//这里的store是ObjectStore 
+//几经辗转最后调用到继承类FileStore::queue_transactions()开始处理。
   parent->queue_transactions(tls, op.op);
 }
 
+//itfanr
+//C_OSD_OnOpApplied->finish()  调取pg->op_applied()，
+//最后到ReplicatedBackend::op_applied()
 void ReplicatedBackend::op_applied(
   InProgressOp *op)
 {
@@ -637,6 +657,9 @@ void ReplicatedBackend::op_applied(
     op->on_applied->complete(0);
     op->on_applied = 0;
   }
+  //这里开始检查是不是所有的waiting_for_applied、
+ // waiting_for_commit队列中都已经处理完成则done成功，
+  //那时就可以删除in_progress_ops队列的ops了。
   if (op->done()) {
     assert(!op->on_commit && !op->on_applied);
     in_progress_ops.erase(op->tid);

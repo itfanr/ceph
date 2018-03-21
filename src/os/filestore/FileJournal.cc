@@ -1254,7 +1254,17 @@ void FileJournal::flush()
   dout(10) << "flush done" << dendl;
 }
 
+//itfanr
+//真正写journal的线程
+/*
+这个写操作的线程就是要把数据写入到文件当中，
+完成后调取completions中对应的成员进行回调，
+然后调到C_JournaledAhead->finish（），
+再进入FileStore::_journaled_ahead()中，
+这个函数分为了两个部分，一部分是将data操作提交到op_wq队列，
+另外一个就是对于journal操作完成的回调处理。
 
+*/
 void FileJournal::write_thread_entry()
 {
   dout(10) << "write_thread_entry start" << dendl;
@@ -1688,12 +1698,17 @@ void FileJournal::submit_entry(uint64_t seq, bufferlist& e, uint32_t orig_len,
     aio_write_queue_bytes += e.length();
     aio_cond.Signal();
 #endif
-
+//itfanr
+/*
+将申请的写日志完成的回调oncommit添加到completions队列中，
+等待写日志完成后开始调用，这里指的是C_JournaledAhead。
+*/
     completions.push_back(
       completion_item(
 	seq, oncommit, ceph_clock_now(g_ceph_context), osd_op));
+//将本次需要写入的buffer统计到写线程的队列writeq中
     if (writeq.empty())
-      writeq_cond.Signal();
+      writeq_cond.Signal();//唤醒write_thread_entry，关键
     writeq.push_back(write_item(seq, e, orig_len, osd_op));
   }
 }

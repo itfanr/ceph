@@ -1935,6 +1935,8 @@ void PG::queue_op(OpRequestRef& op)
     return;
   }
   op->mark_queued_for_pg();
+  //itfanr
+  //实际调用的是OSD::ShardedOpWQ::_enqueue()
   osd->op_wq.queue(make_pair(PGRef(this), op));
   {
     // after queue() to include any locking costs

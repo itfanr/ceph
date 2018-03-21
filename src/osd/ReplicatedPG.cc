@@ -1440,6 +1440,8 @@ void ReplicatedPG::get_src_oloc(const object_t& oid, const object_locator_t& olo
     src_oloc.key = oid.name;
 }
 
+//itfanr
+//关键处理函数
 void ReplicatedPG::do_request(
   OpRequestRef& op,
   ThreadPool::TPHandle &handle)
@@ -1581,6 +1583,8 @@ bool ReplicatedPG::check_src_targ(const hobject_t& soid, const hobject_t& toid) 
  * pg lock will be held (if multithreaded)
  * osd_lock NOT held.
  */
+ //itfanr
+//关键处理函数
 void ReplicatedPG::do_op(OpRequestRef& op)
 {
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
@@ -2067,6 +2071,8 @@ void ReplicatedPG::do_op(OpRequestRef& op)
     }
   }
 
+  //itfanr
+  //创建一个OpContext结构，该结构会接管message中的所有ops的操作
   OpContext *ctx = new OpContext(op, m->get_reqid(), m->ops, obc, this);
 
   if (!obc->obs.exists)
@@ -2883,6 +2889,9 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
 
   // this method must be idempotent since we may call it several times
   // before we finally apply the resulting transaction.
+  //itfanr
+  //get_transaction的实现由ReplicatedBackend::get_transaction() 完成
+  //申请一个叫做RPGTransaction 然后交给了ctx->op_t
   ctx->op_t.reset(pgbackend->get_transaction());
 
   if (op->may_write() || op->may_cache()) {
@@ -2940,7 +2949,12 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
     tracepoint(osd, prepare_tx_enter, reqid.name._type,
         reqid.name._num, reqid.tid, reqid.inc);
   }
-
+//itfanr
+//将 ops上要写入的数据全部都按着结构保存在transaction的data_bl，op_bl中。
+//拿着这个transaction 就已经获得了全部的操作和数据，
+//这也就是将ops与Transaction绑定的结果。
+//因为primary osd不仅仅是要自己保存数据，其他的replica osd也要保存数据的副本，
+//这里有primary osd将准备好的数据发送给replica osd。
   int result = prepare_transaction(ctx);
 
   {
@@ -3098,9 +3112,23 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   // issue replica writes
   ceph_tid_t rep_tid = osd->get_tid();
 
+//itfanr
+//申请repop，这个repop是用来管理发送给其他副本以及自己进行数据处理的统计
+//根据这个结构可知哪些osd都完成了数据的读写操作，回调必不可少的。
   RepGather *repop = new_repop(ctx, obc, rep_tid);
-
+/*
+issue_repop()将操作率先发给其他副本，这里其实就是与其他副本通信，
+将ops发送给其他副本，其他副本操作完成时能够及时的回调找到repop，
+然后开始处理，在issue_repop中规定了所有osd完成时的on_all_commit与on_all_applied的操作，
+并且将提交Transaction，使用函数submit_transaction()。
+这里pgbackend->submit_transaction()函数中，
+pgbackend对象已经被ReplicatedBackend进行了继承，
+所以最终使用的是ReplicatedBackend::submit_transaction()。
+*/
   issue_repop(repop, ctx);
+//itfanr
+//如果数据处理完成了，使用eval_repop()进行收尾的工作，
+//将结果回调给客户端。
   eval_repop(repop);
   repop->put();
 }
@@ -8343,6 +8371,8 @@ void ReplicatedPG::op_applied(const eversion_t &applied_version)
   }
 }
 
+//itfanr
+//关键函数，请求返回客户端
 void ReplicatedPG::eval_repop(RepGather *repop)
 {
   MOSDOp *m = NULL;
@@ -8401,8 +8431,10 @@ void ReplicatedPG::eval_repop(RepGather *repop)
     }
 
     // send dup acks, in order
+    //查看是否存在请求需要回调。
     if (waiting_for_ack.count(repop->v)) {
       assert(waiting_for_ack.begin()->first == repop->v);
+	  //开始循环处理这里的请求，然后将请求发还给客户端。
       for (list<pair<OpRequestRef, version_t> >::iterator i =
 	     waiting_for_ack[repop->v].begin();
 	   i != waiting_for_ack[repop->v].end();
@@ -8412,6 +8444,7 @@ void ReplicatedPG::eval_repop(RepGather *repop)
 	reply->set_reply_versions(repop->v,
 				  i->second);
 	reply->add_flags(CEPH_OSD_FLAG_ACK);
+	//将请求发还给客户端
 	osd->send_message_osd_client(reply, m->get_connection());
       }
       waiting_for_ack.erase(repop->v);

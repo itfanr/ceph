@@ -1893,6 +1893,8 @@ void FileStore::_do_op(OpSequencer *osr, ThreadPool::TPHandle &handle)
 
 }
 
+//itfanr
+//被OpWQ::_process_finish()调用
 void FileStore::_finish_op(OpSequencer *osr)
 {
   list<Context*> to_queue;
@@ -1908,13 +1910,15 @@ void FileStore::_finish_op(OpSequencer *osr)
   op_queue_release_throttle(o);
 
   logger->tinc(l_os_apply_lat, lat);
-
+//开始回调sync的操作，暂时没有涉及到快照克隆等 不需要考虑。
   if (o->onreadable_sync) {
     o->onreadable_sync->complete(0);
   }
+  //准备开始回调onreadable的参数，这里回调注册的为C_OSD_OnOpCommit。
   if (o->onreadable) {
     apply_finishers[osr->id % m_apply_finisher_num]->queue(o->onreadable);
   }
+  //进行其他操作的回调处理。
   if (!to_queue.empty()) {
     apply_finishers[osr->id % m_apply_finisher_num]->queue(to_queue);
   }
@@ -1971,7 +1975,13 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
   for (vector<Transaction>::iterator i = tls.begin(); i != tls.end(); ++i) {
     (*i).set_osr(osr);
   }
-
+//itfanr
+/*
+  在进行存储数据的时候 肯定是需要记录journal的，
+  也就是当数据进行写入的时候需要写到journal中一份，
+  当data数据失败的时候可以从journal中进行恢复。
+  所以这里为了安全起见，一般都会采用journal的方式进行保存数据。
+*/
   if (journal && journal->is_writeable() && !m_filestore_journal_trailing) {
     Op *o = build_op(tls, onreadable, onreadable_sync, osd_op);
 
@@ -1996,16 +2006,20 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
 
     if (m_filestore_journal_parallel) {
       dout(5) << "queue_transactions (parallel) " << o->op << " " << o->tls << dendl;
-
+	//准备写入日志的操作_op_journal_transactions
       _op_journal_transactions(tbl, orig_len, o->op, ondisk, osd_op);
 
       // queue inside submit_manager op submission lock
+      //准备写入数据的操作queue_op
       queue_op(osr, o);
     } else if (m_filestore_journal_writeahead) {
       dout(5) << "queue_transactions (writeahead) " << o->op << " " << o->tls << dendl;
 
       osr->queue_journal(o->op);
-
+	//itfanr
+	//这时申请一个C_JournaledAhead的回调操作，
+	//这个操作会在日志完成之后进行回调处理处理时会将data写入磁盘。
+	//C_JournaledAhead回调很关键
       _op_journal_transactions(tbl, orig_len, o->op,
 			       new C_JournaledAhead(this, osr, o, ondisk),
 			       osd_op);
@@ -2083,11 +2097,14 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
   return r;
 }
 
+//回调函数
 void FileStore::_journaled_ahead(OpSequencer *osr, Op *o, Context *ondisk)
 {
   dout(5) << "_journaled_ahead " << o << " seq " << o->op << " " << *osr << " " << o->tls << dendl;
 
-  // this should queue in order because the journal does it's completions in order.
+ // this should queue in order because the journal does it's completions in order.
+//将操作的op添加到FileStore:: op_wq中，
+//然后等待写数据的线程将数据写入文件。
   queue_op(osr, o);
 
   list<Context*> to_queue;
@@ -2097,6 +2114,7 @@ void FileStore::_journaled_ahead(OpSequencer *osr, Op *o, Context *ondisk)
   // getting blocked behind an ondisk completion.
   if (ondisk) {
     dout(10) << " queueing ondisk " << ondisk << dendl;
+	//将日志保存完成的回调ondisk交给ondisk_finisher，后续有finisher线程处理，这里的ondisk注册回调为C_OSD_OnOpApplied。
     ondisk_finishers[osr->id % m_ondisk_finisher_num]->queue(ondisk);
   }
   if (!to_queue.empty()) {
@@ -2382,7 +2400,9 @@ int FileStore::_check_replay_guard(int fd, const SequencerPosition& spos)
     return 1;
   }
 }
-
+//data的写操作线程OpWQ::_process(),再调到FileStore::_do_op()函数中，
+//再到FileStore::_do_transactions()函数、
+//FileStore::_do_transaction()函数调用
 void FileStore::_do_transaction(
   Transaction& t, uint64_t op_seq, int trans_num,
   ThreadPool::TPHandle *handle)
@@ -2419,7 +2439,7 @@ void FileStore::_do_transaction(
         tracepoint(objectstore, touch_exit, r);
       }
       break;
-
+	//这里解析这个操作，肯定是一个OP_WRITE的操作。
     case Transaction::OP_WRITE:
       {
         coll_t cid = i.get_cid(op->cid);
@@ -2432,6 +2452,8 @@ void FileStore::_do_transaction(
         i.decode_bl(bl);
         tracepoint(objectstore, write_enter, osr_name, off, len);
         if (_check_replay_guard(cid, oid, spos) > 0)
+		//开始调用FileStore::_write 将数据真正的写入文件中的正确位置。
+		//当完成写任务后开始进行逐级回调。
           r = _write(cid, oid, off, len, bl, fadvise_flags);
         tracepoint(objectstore, write_exit, r);
       }

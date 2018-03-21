@@ -260,6 +260,9 @@ void JournalingObjectStore::_op_journal_transactions(
     dout(10) << "op_journal_transactions " << op  << dendl;
 
   if (journal && journal->is_writeable()) {
+  	//提交日志数据，完成下发任务journal->submit_entry，
+  	//这里的journal由继承类FileJournal 实现的，
+  	//所以这里继续调用FileJournal::submit_entry()。
     journal->submit_entry(op, tbl, orig_len, onjournal, osd_op);
   } else if (onjournal) {
     apply_manager.add_waiter(op, onjournal);
