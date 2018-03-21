@@ -15,11 +15,10 @@
 #ifndef CEPH_LOGCLIENT_H
 #define CEPH_LOGCLIENT_H
 
+#include <atomic>
 #include "common/LogEntry.h"
 #include "common/Mutex.h"
-
-#include <iosfwd>
-#include <sstream>
+#include "include/health.h"
 
 class LogClient;
 class MLog;
@@ -33,7 +32,7 @@ struct Connection;
 class LogChannel;
 
 namespace ceph {
-namespace log {
+namespace logging {
   class Graylog;
 }
 }
@@ -92,6 +91,23 @@ public:
   }
   void debug(std::stringstream &s) {
     do_log(CLOG_DEBUG, s);
+  }
+  /**
+   * Convenience function mapping health status to
+   * the appropriate cluster log severity.
+   */
+  LogClientTemp health(health_status_t health) {
+    switch(health) {
+      case HEALTH_OK:
+        return info();
+      case HEALTH_WARN:
+        return warn();
+      case HEALTH_ERR:
+        return error();
+      default:
+        // Invalid health_status_t value
+        ceph_abort();
+    }
   }
   LogClientTemp info() {
     return LogClientTemp(CLOG_INFO, *this);
@@ -182,7 +198,7 @@ private:
   std::string syslog_facility;
   bool log_to_syslog;
   bool log_to_monitors;
-  shared_ptr<ceph::log::Graylog> graylog;
+  shared_ptr<ceph::logging::Graylog> graylog;
 
 
   friend class LogClientTemp;
@@ -205,8 +221,7 @@ public:
   }
 
   bool handle_log_ack(MLogAck *m);
-  void reset_session();
-  Message *get_mon_log_message();
+  Message *get_mon_log_message(bool flush);
   bool are_pending();
 
   LogChannelRef create_channel() {
@@ -218,7 +233,7 @@ public:
     if (channels.count(name))
       c = channels[name];
     else {
-      c = LogChannelRef(new LogChannel(cct, this, name));
+      c = std::make_shared<LogChannel>(cct, this, name);
       channels[name] = c;
     }
     return c;
@@ -233,6 +248,9 @@ public:
     channels.clear();
   }
 
+  uint64_t get_next_seq();
+  const entity_inst_t& get_myinst();
+  const EntityName& get_myname();
   version_t queue(LogEntry &entry);
 
 private:

@@ -43,9 +43,12 @@ def get_features():
     if features is not None:
         features = int(features)
     else:
-        features = int(RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_LAYERING)
+        features = int(RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_LAYERING |
+                       RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF)
     assert((features & RBD_FEATURE_EXCLUSIVE_LOCK) != 0)
     assert((features & RBD_FEATURE_LAYERING) != 0)
+    assert((features & RBD_FEATURE_OBJECT_MAP) != 0)
+    assert((features & RBD_FEATURE_FAST_DIFF) != 0)
     return features
 
 def master(ioctx):
@@ -61,6 +64,7 @@ def master(ioctx):
         image.create_snap('snap1')
         image.protect_snap('snap1')
 
+    features = features & ~(RBD_FEATURE_FAST_DIFF)
     RBD().clone(ioctx, PARENT_IMG_NAME, 'snap1', ioctx, CLONE_IMG_NAME,
                 features=features)
     with Image(ioctx, CLONE_IMG_NAME) as image:
@@ -98,7 +102,6 @@ def slave(ioctx):
 
     print("rename")
     RBD().rename(ioctx, CLONE_IMG_NAME, CLONE_IMG_RENAME);
-    assert(not image.is_exclusive_lock_owner())
 
     with Image(ioctx, CLONE_IMG_RENAME) as image:
         print("flatten")
@@ -137,11 +140,17 @@ def slave(ioctx):
         assert(not image.is_exclusive_lock_owner())
         assert(list(image.list_snaps()) == [])
 
-        print("rebuild object map")
-        image.update_features(RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF,
-                              False)
+        print("update_features")
+        assert((image.features() & RBD_FEATURE_OBJECT_MAP) != 0)
+        image.update_features(RBD_FEATURE_OBJECT_MAP, False)
+        assert(not image.is_exclusive_lock_owner())
+        assert((image.features() & RBD_FEATURE_OBJECT_MAP) == 0)
         image.update_features(RBD_FEATURE_OBJECT_MAP, True)
+        assert(not image.is_exclusive_lock_owner())
+        assert((image.features() & RBD_FEATURE_OBJECT_MAP) != 0)
         assert((image.flags() & RBD_FLAG_OBJECT_MAP_INVALID) != 0)
+
+        print("rebuild object map")
         image.rebuild_object_map()
         assert(not image.is_exclusive_lock_owner())
         assert((image.flags() & RBD_FLAG_OBJECT_MAP_INVALID) == 0)

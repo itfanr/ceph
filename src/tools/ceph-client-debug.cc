@@ -23,6 +23,7 @@
 #include "client/Dir.h"
 #include "include/cephfs/libcephfs.h"
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_client
 
 void usage()
@@ -38,11 +39,11 @@ void usage()
  */
 void traverse_dentries(Inode *ino, std::vector<Dentry*> &parts)
 {
-  if (ino->dn_set.empty()) {
+  if (ino->dentries.empty()) {
     return;
   }
   
-  Dentry* dn = *(ino->dn_set.begin());
+  Dentry* dn = *(ino->dentries.begin());
   parts.push_back(dn);
   traverse_dentries(dn->dir->parent_inode, parts);
 }
@@ -60,8 +61,8 @@ int lookup_trace(ceph_mount_info *client, inodeno_t const ino)
   if (r != 0) {
     return r;
   } else {
-    if (!inode->dn_set.empty()) {
-      Dentry *dn = *(inode->dn_set.begin());
+    if (!inode->dentries.empty()) {
+      Dentry *dn = *(inode->dentries.begin());
       assert(dn->dir);
       assert(dn->dir->parent_inode);
       r = lookup_trace(client, dn->dir->parent_inode->ino);
@@ -83,10 +84,11 @@ int main(int argc, const char **argv)
   // Argument handling
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
-  env_to_vec(args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY,
-	      CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS|
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   
   common_init_finish(g_ceph_context);
 

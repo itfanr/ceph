@@ -15,18 +15,13 @@
 
 #include <string>
 #include <errno.h>
-#include <sstream>
 
 #include "objclass/objclass.h"
 
 #include "cls_cephfs.h"
 
 CLS_VER(1,0)
-CLS_NAME(cephfs_size_scan)
-
-cls_handle_t h_class;
-cls_method_handle_t h_accumulate_inode_metadata;
-
+CLS_NAME(cephfs)
 
 
 std::ostream &operator<<(std::ostream &out, const ObjCeiling &in)
@@ -43,7 +38,7 @@ std::ostream &operator<<(std::ostream &out, const ObjCeiling &in)
  * If the xattr is missing, then it is set to the input integer.
  *
  * @param xattr_name: name of xattr to compare against and set
- * @param input_val: candidate new value, of ::encode()'able type
+ * @param input_val: candidate new value, of encode()'able type
  * @returns 0 on success (irrespective of whether our new value
  *          was used) else an error code
  */
@@ -61,7 +56,7 @@ static int set_if_greater(cls_method_context_t hctx,
     bufferlist::iterator existing_p = existing_val_bl.begin();
     try {
       A existing_val;
-      ::decode(existing_val, existing_p);
+      decode(existing_val, existing_p);
       if (!existing_p.end()) {
         // Trailing junk?  Consider it invalid and overwrite
         set_val = true;
@@ -80,7 +75,7 @@ static int set_if_greater(cls_method_context_t hctx,
   // Conditionally set the new xattr
   if (set_val) {
     bufferlist set_bl;
-    ::encode(input_val, set_bl);
+    encode(input_val, set_bl);
     return cls_cxx_setxattr(hctx, xattr_name.c_str(), &set_bl);
   } else {
     return 0;
@@ -131,7 +126,7 @@ class PGLSCephFSFilter : public PGLSFilter {
 protected:
   std::string scrub_tag;
 public:
-  int init(bufferlist::iterator& params) {
+  int init(bufferlist::iterator& params) override {
     try {
       InodeTagFilterArgs args;
       args.decode(params);
@@ -149,10 +144,10 @@ public:
     return 0;
   }
 
-  virtual ~PGLSCephFSFilter() {}
-  virtual bool reject_empty_xattr() { return false; }
-  virtual bool filter(const hobject_t &obj, bufferlist& xattr_data,
-                      bufferlist& outdata);
+  ~PGLSCephFSFilter() override {}
+  bool reject_empty_xattr() override { return false; }
+  bool filter(const hobject_t &obj, bufferlist& xattr_data,
+                      bufferlist& outdata) override;
 };
 
 bool PGLSCephFSFilter::filter(const hobject_t &obj,
@@ -174,7 +169,7 @@ bool PGLSCephFSFilter::filter(const hobject_t &obj,
     std::string tag_ondisk;
     bufferlist::iterator q = xattr_data.begin();
     try {
-      ::decode(tag_ondisk, q);
+      decode(tag_ondisk, q);
       if (tag_ondisk == scrub_tag)
 	return false;
     } catch (const buffer::error &err) {
@@ -195,11 +190,14 @@ PGLSFilter *inode_tag_filter()
  * We do two things here: we register the new class, and then register
  * all of the class's methods.
  */
-void __cls_init()
+CLS_INIT(cephfs)
 {
   // this log message, at level 0, will always appear in the ceph-osd
   // log file.
-  CLS_LOG(0, "loading cephfs_size_scan");
+  CLS_LOG(0, "loading cephfs");
+
+  cls_handle_t h_class;
+  cls_method_handle_t h_accumulate_inode_metadata;
 
   cls_register("cephfs", &h_class);
   cls_register_cxx_method(h_class, "accumulate_inode_metadata",

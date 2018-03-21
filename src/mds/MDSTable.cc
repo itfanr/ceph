@@ -28,6 +28,7 @@
 #include "include/assert.h"
 
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
 #define dout_prefix *_dout << "mds." << rank << "." << table_name << ": "
@@ -37,7 +38,7 @@ class MDSTableIOContext : public MDSIOContextBase
 {
   protected:
     MDSTable *ida;
-    MDSRank *get_mds() {return ida->mds;}
+    MDSRank *get_mds() override {return ida->mds;}
   public:
     explicit MDSTableIOContext(MDSTable *ida_) : ida(ida_) {
       assert(ida != NULL);
@@ -49,7 +50,7 @@ class C_IO_MT_Save : public MDSTableIOContext {
   version_t version;
 public:
   C_IO_MT_Save(MDSTable *i, version_t v) : MDSTableIOContext(i), version(v) {}
-  void finish(int r) {
+  void finish(int r) override {
     ida->save_2(r, version);
   }
 };
@@ -59,7 +60,8 @@ void MDSTable::save(MDSInternalContextBase *onfinish, version_t v)
   if (v > 0 && v <= committing_version) {
     dout(10) << "save v " << version << " - already saving "
 	     << committing_version << " >= needed " << v << dendl;
-    waitfor_save[v].push_back(onfinish);
+    if (onfinish)
+      waitfor_save[v].push_back(onfinish);
     return;
   }
   
@@ -67,7 +69,7 @@ void MDSTable::save(MDSInternalContextBase *onfinish, version_t v)
   assert(is_active());
   
   bufferlist bl;
-  ::encode(version, bl);
+  encode(version, bl);
   encode_state(bl);
 
   committing_version = version;
@@ -81,8 +83,7 @@ void MDSTable::save(MDSInternalContextBase *onfinish, version_t v)
   object_locator_t oloc(mds->mdsmap->get_metadata_pool());
   mds->objecter->write_full(oid, oloc,
 			    snapc,
-			    bl, ceph::real_clock::now(g_ceph_context), 0,
-			    NULL,
+			    bl, ceph::real_clock::now(), 0,
 			    new C_OnFinisher(new C_IO_MT_Save(this, version),
 					     mds->finisher));
 }
@@ -92,7 +93,7 @@ void MDSTable::save_2(int r, version_t v)
   if (r < 0) {
     dout(1) << "save error " << r << " v " << v << dendl;
     mds->clog->error() << "failed to store table " << table_name << " object,"
-		       << " errno " << r << "\n";
+		       << " errno " << r;
     mds->handle_write_error(r);
     return;
   }
@@ -125,7 +126,7 @@ public:
   Context *onfinish;
   bufferlist bl;
   C_IO_MT_Load(MDSTable *i, Context *o) : MDSTableIOContext(i), onfinish(o) {}
-  void finish(int r) {
+  void finish(int r) override {
     ida->load_2(r, bl, onfinish);
   }
 };
@@ -174,7 +175,7 @@ void MDSTable::load_2(int r, bufferlist& bl, Context *onfinish)
   bufferlist::iterator p = bl.begin();
 
   try {
-    ::decode(version, p);
+    decode(version, p);
     projected_version = committed_version = version;
     dout(10) << "load_2 loaded v" << version << dendl;
     decode_state(p);

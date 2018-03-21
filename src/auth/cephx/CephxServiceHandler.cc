@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <sstream>
 
+#include "include/random.h"
 #include "common/config.h"
 #include "common/debug.h"
 
@@ -30,14 +31,14 @@ int CephxServiceHandler::start_session(EntityName& name, bufferlist::iterator& i
 {
   entity_name = name;
 
-  get_random_bytes((char *)&server_challenge, sizeof(server_challenge));
-  if (!server_challenge)
-    server_challenge = 1;  // always non-zero.
+  uint64_t min = 1; // always non-zero
+  uint64_t max = std::numeric_limits<uint64_t>::max();
+  server_challenge = ceph::util::generate_random_number<uint64_t>(min, max);
   ldout(cct, 10) << "start_session server_challenge " << hex << server_challenge << dec << dendl;
 
   CephXServerChallenge ch;
   ch.server_challenge = server_challenge;
-  ::encode(ch, result_bl);
+  encode(ch, result_bl);
   return CEPH_AUTH_CEPHX;
 }
 
@@ -46,7 +47,7 @@ int CephxServiceHandler::handle_request(bufferlist::iterator& indata, bufferlist
   int ret = 0;
 
   struct CephXRequestHeader cephx_header;
-  ::decode(cephx_header, indata);
+  decode(cephx_header, indata);
 
 
   switch (cephx_header.request_type) {
@@ -55,7 +56,7 @@ int CephxServiceHandler::handle_request(bufferlist::iterator& indata, bufferlist
       ldout(cct, 10) << "handle_request get_auth_session_key for " << entity_name << dendl;
 
       CephXAuthenticate req;
-      ::decode(req, indata);
+      decode(req, indata);
 
       CryptoKey secret;
       if (!key_server->get_secret(entity_name, secret)) {
@@ -106,7 +107,7 @@ int CephxServiceHandler::handle_request(bufferlist::iterator& indata, bufferlist
         should_enc_ticket = true;
       }
 
-      info.ticket.init_timestamps(ceph_clock_now(cct), cct->_conf->auth_mon_ticket_ttl);
+      info.ticket.init_timestamps(ceph_clock_now(), cct->_conf->auth_mon_ticket_ttl);
       info.ticket.name = entity_name;
       info.ticket.global_id = global_id;
       info.ticket.auid = eauth.auid;
@@ -158,23 +159,36 @@ int CephxServiceHandler::handle_request(bufferlist::iterator& indata, bufferlist
       }
 
       CephXServiceTicketRequest ticket_req;
-      ::decode(ticket_req, indata);
+      decode(ticket_req, indata);
       ldout(cct, 10) << " ticket_req.keys = " << ticket_req.keys << dendl;
 
       ret = 0;
       vector<CephXSessionAuthInfo> info_vec;
-      for (uint32_t service_id = 1; service_id <= ticket_req.keys; service_id <<= 1) {
+      int found_services = 0;
+      int service_err = 0;
+      for (uint32_t service_id = 1; service_id <= ticket_req.keys;
+	   service_id <<= 1) {
         if (ticket_req.keys & service_id) {
-	  ldout(cct, 10) << " adding key for service " << ceph_entity_type_name(service_id) << dendl;
+	  ldout(cct, 10) << " adding key for service "
+			 << ceph_entity_type_name(service_id) << dendl;
           CephXSessionAuthInfo info;
-          int r = key_server->build_session_auth_info(service_id, auth_ticket_info, info);
+          int r = key_server->build_session_auth_info(service_id,
+						      auth_ticket_info, info);
+	  // tolerate missing MGR rotating key for the purposes of upgrades.
           if (r < 0) {
-            ret = r;
-            break;
-          }
+	    ldout(cct, 10) << "   missing key for service "
+			   << ceph_entity_type_name(service_id) << dendl;
+	    service_err = r;
+	    continue;
+	  }
           info.validity += cct->_conf->auth_service_ticket_ttl;
           info_vec.push_back(info);
+	  ++found_services;
         }
+      }
+      if (!found_services && service_err) {
+	ldout(cct, 10) << __func__ << " did not find any service keys" << dendl;
+	ret = service_err;
       }
       CryptoKey no_key;
       build_cephx_response_header(cephx_header.request_type, ret, result_bl);
@@ -205,5 +219,5 @@ void CephxServiceHandler::build_cephx_response_header(int request_type, int stat
   struct CephXResponseHeader header;
   header.request_type = request_type;
   header.status = status;
-  ::encode(header, bl);
+  encode(header, bl);
 }

@@ -16,6 +16,8 @@
 #ifndef CEPH_MDENTRYUNLINK_H
 #define CEPH_MDENTRYUNLINK_H
 
+#include <string_view>
+
 class MDentryUnlink : public Message {
   dirfrag_t dirfrag;
   string dn;
@@ -28,29 +30,30 @@ class MDentryUnlink : public Message {
 
   MDentryUnlink() :
     Message(MSG_MDS_DENTRYUNLINK) { }
-  MDentryUnlink(dirfrag_t df, string& n) :
+  MDentryUnlink(dirfrag_t df, std::string_view n) :
     Message(MSG_MDS_DENTRYUNLINK),
     dirfrag(df),
     dn(n) {}
 private:
-  ~MDentryUnlink() {}
+  ~MDentryUnlink() override {}
 
 public:
-  const char *get_type_name() const { return "dentry_unlink";}
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "dentry_unlink";}
+  void print(ostream& o) const override {
     o << "dentry_unlink(" << dirfrag << " " << dn << ")";
   }
   
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
-    ::decode(dirfrag, p);
-    ::decode(dn, p);
-    ::decode(straybl, p);
+    decode(dirfrag, p);
+    decode(dn, p);
+    decode(straybl, p);
   }
-  void encode_payload(uint64_t features) {
-    ::encode(dirfrag, payload);
-    ::encode(dn, payload);
-    ::encode(straybl, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(dirfrag, payload);
+    encode(dn, payload);
+    encode(straybl, payload);
   }
 };
 

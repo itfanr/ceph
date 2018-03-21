@@ -19,12 +19,10 @@
 
 #include <atomic>
 #include <pthread.h>
-#include <signal.h>
 #include <climits>
 #include <list>
 #include <mutex>
 #include <map>
-using namespace std;
 
 #include "auth/AuthSessionHandler.h"
 #include "common/ceph_time.h"
@@ -57,8 +55,6 @@ class AsyncConnection : public Connection {
     outcoming_bl.claim_append(bl);
     return _try_send(more);
   }
-  // if "send" is false, it will only append bl to send buffer
-  // the main usage is avoid error happen outside messenger threads
   ssize_t _try_send(bool more=false);
   ssize_t _send(Message *m);
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
@@ -73,9 +69,9 @@ class AsyncConnection : public Connection {
   void discard_out_queue();
   void discard_requeued_up_to(uint64_t seq);
   void requeue_sent();
-  int randomize_out_seq();
+  void randomize_out_seq();
   void handle_ack(uint64_t seq);
-  void _send_keepalive_or_ack(bool ack=false, utime_t *t=NULL);
+  void _append_keepalive_or_ack(bool ack=false, utime_t *t=NULL);
   ssize_t write_message(Message *m, bufferlist& bl, bool more);
   void inject_delay();
   ssize_t _reply_accept(char tag, ceph_msg_connect &connect, ceph_msg_connect_reply &reply,
@@ -116,17 +112,16 @@ class AsyncConnection : public Connection {
   }
   Message *_get_next_outgoing(bufferlist *bl) {
     Message *m = 0;
-    while (!m && !out_q.empty()) {
+    if (!out_q.empty()) {
       map<int, list<pair<bufferlist, Message*> > >::reverse_iterator it = out_q.rbegin();
-      if (!it->second.empty()) {
-        list<pair<bufferlist, Message*> >::iterator p = it->second.begin();
-        m = p->second;
-        if (bl)
-          bl->swap(p->first);
-        it->second.erase(p);
-      }
+      assert(!it->second.empty());
+      list<pair<bufferlist, Message*> >::iterator p = it->second.begin();
+      m = p->second;
+      if (bl)
+	bl->swap(p->first);
+      it->second.erase(p);
       if (it->second.empty())
-        out_q.erase(it->first);
+	out_q.erase(it->first);
     }
     return m;
   }
@@ -143,7 +138,7 @@ class AsyncConnection : public Connection {
    */
   class DelayedDelivery : public EventCallback {
     std::set<uint64_t> register_time_events; // need to delete it if stop
-    std::deque<std::pair<utime_t, Message*> > delay_queue;
+    std::deque<Message*> delay_queue;
     std::mutex delay_lock;
     AsyncMessenger *msgr;
     EventCenter *center;
@@ -156,15 +151,15 @@ class AsyncConnection : public Connection {
                              DispatchQueue *q, uint64_t cid)
       : msgr(omsgr), center(c), dispatch_queue(q), conn_id(cid),
         stop_dispatch(false) { }
-    ~DelayedDelivery() {
+    ~DelayedDelivery() override {
       assert(register_time_events.empty());
       assert(delay_queue.empty());
     }
     void set_center(EventCenter *c) { center = c; }
-    void do_request(int id) override;
-    void queue(double delay_period, utime_t release, Message *m) {
+    void do_request(uint64_t id) override;
+    void queue(double delay_period, Message *m) {
       std::lock_guard<std::mutex> l(delay_lock);
-      delay_queue.push_back(std::make_pair(release, m));
+      delay_queue.push_back(m);
       register_time_events.insert(center->create_time_event(delay_period*1000000, this));
     }
     void discard() {
@@ -172,7 +167,7 @@ class AsyncConnection : public Connection {
       center->submit_to(center->get_id(), [this] () mutable {
         std::lock_guard<std::mutex> l(delay_lock);
         while (!delay_queue.empty()) {
-          Message *m = delay_queue.front().second;
+          Message *m = delay_queue.front();
           dispatch_queue->dispatch_throttle_release(m->get_dispatch_throttle_size());
           m->put();
           delay_queue.pop_front();
@@ -189,7 +184,7 @@ class AsyncConnection : public Connection {
 
  public:
   AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQueue *q, Worker *w);
-  ~AsyncConnection();
+  ~AsyncConnection() override;
   void maybe_start_delay_thread();
 
   ostream& _conn_prefix(std::ostream *_dout);
@@ -253,7 +248,7 @@ class AsyncConnection : public Connection {
     STATE_WAIT,       // just wait for racing connection
   };
 
-  static const int TCP_PREFETCH_MIN_SIZE;
+  static const uint32_t TCP_PREFETCH_MIN_SIZE;
   static const char *get_state_name(int state) {
       const char* const statenames[] = {"STATE_NONE",
                                         "STATE_OPEN",
@@ -296,8 +291,8 @@ class AsyncConnection : public Connection {
   PerfCounters *logger;
   int global_seq;
   __u32 connect_seq, peer_global_seq;
-  atomic64_t out_seq;
-  atomic64_t ack_left, in_seq;
+  std::atomic<uint64_t> out_seq{0};
+  std::atomic<uint64_t> ack_left{0}, in_seq{0};
   int state;
   int state_after_send;
   ConnectedSocket cs;
@@ -305,6 +300,10 @@ class AsyncConnection : public Connection {
   Messenger::Policy policy;
 
   DispatchQueue *dispatch_queue;
+
+  // lockfree, only used in own thread
+  bufferlist outcoming_bl;
+  bool open_write = false;
 
   std::mutex write_lock;
   enum class WriteStatus {
@@ -314,10 +313,8 @@ class AsyncConnection : public Connection {
     CLOSED
   };
   std::atomic<WriteStatus> can_write;
-  bool open_write;
-  map<int, list<pair<bufferlist, Message*> > > out_q;  // priority queue for outbound msgs
   list<Message*> sent; // the first bufferlist need to inject seq
-  bufferlist outcoming_bl;
+  map<int, list<pair<bufferlist, Message*> > > out_q;  // priority queue for outbound msgs
   bool keepalive;
 
   std::mutex lock;
@@ -326,7 +323,6 @@ class AsyncConnection : public Connection {
   EventCallbackRef write_handler;
   EventCallbackRef wakeup_handler;
   EventCallbackRef tick_handler;
-  struct iovec msgvec[ASYNC_IOV_MAX];
   char *recv_buf;
   uint32_t recv_max_prefetch;
   uint32_t recv_start;

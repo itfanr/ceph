@@ -1,4 +1,5 @@
 from __future__ import print_function
+from nose import SkipTest
 from nose.tools import eq_ as eq, ok_ as ok, assert_raises
 from rados import (Rados, Error, RadosStateError, Object, ObjectExists,
                    ObjectNotFound, ObjectBusy, requires, opt,
@@ -8,10 +9,11 @@ import time
 import threading
 import json
 import errno
+import os
 import sys
 
 # Are we running Python 2.x
-_python2 = sys.hexversion < 0x03000000
+_python2 = sys.version_info[0] < 3
 
 def test_rados_init_error():
     assert_raises(Error, Rados, conffile='', rados_id='admin',
@@ -144,7 +146,10 @@ class TestRados(object):
         ret, buf, out = self.rados.mon_command(json.dumps(cmd), b'')
         for mon in json.loads(buf.decode('utf8'))['mons']:
             while True:
-                buf = json.loads(self.rados.ping_monitor(mon['name']))
+                output = self.rados.ping_monitor(mon['name'])
+                if output is None:
+                    continue
+                buf = json.loads(output)
                 if buf.get('health'):
                     break
 
@@ -365,7 +370,7 @@ class TestIoctx(object):
                 ('ns1', 'ns1-c'), ('ns1', 'ns1-d')])
 
     def test_xattrs(self):
-        xattrs = dict(a=b'1', b=b'2', c=b'3', d=b'a\0b', e=b'\0')
+        xattrs = dict(a=b'1', b=b'2', c=b'3', d=b'a\0b', e=b'\0', f='')
         self.ioctx.write('abc', b'')
         for key, value in xattrs.items():
             self.ioctx.set_xattr('abc', key, value)
@@ -376,7 +381,7 @@ class TestIoctx(object):
         eq(stored_xattrs, xattrs)
 
     def test_obj_xattrs(self):
-        xattrs = dict(a=b'1', b=b'2', c=b'3', d=b'a\0b', e=b'\0')
+        xattrs = dict(a=b'1', b=b'2', c=b'3', d=b'a\0b', e=b'\0', f='')
         self.ioctx.write('abc', b'')
         obj = list(self.ioctx.list_objects())[0]
         for key, value in xattrs.items():
@@ -824,6 +829,117 @@ class TestIoctx(object):
 
         ret, buf = self.ioctx.execute("foo", "hello", "say_hello", b"nose")
         eq(buf, b"Hello, nose!")
+
+    def test_aio_execute(self):
+        count = [0]
+        retval = [None]
+        lock = threading.Condition()
+        def cb(_, buf):
+            with lock:
+                if retval[0] is None:
+                    retval[0] = buf
+                count[0] += 1
+                lock.notify()
+        self.ioctx.write("foo", b"") # ensure object exists
+
+        comp = self.ioctx.aio_execute("foo", "hello", "say_hello", b"", 32, cb, cb)
+        comp.wait_for_complete()
+        with lock:
+            while count[0] < 2:
+                lock.wait()
+        eq(comp.get_return_value(), 13)
+        eq(retval[0], b"Hello, world!")
+
+        retval[0] = None
+        comp = self.ioctx.aio_execute("foo", "hello", "say_hello", b"nose", 32, cb, cb)
+        comp.wait_for_complete()
+        with lock:
+            while count[0] < 4:
+                lock.wait()
+        eq(comp.get_return_value(), 12)
+        eq(retval[0], b"Hello, nose!")
+
+        [i.remove() for i in self.ioctx.list_objects()]
+
+    def test_applications(self):
+        cmd = {"prefix":"osd dump", "format":"json"}
+        ret, buf, errs = self.rados.mon_command(json.dumps(cmd), b'')
+        eq(ret, 0)
+        assert len(buf) > 0
+        release = json.loads(buf.decode("utf-8")).get("require_osd_release",
+                                                      None)
+        if not release or release[0] < 'l':
+            raise SkipTest
+
+        eq([], self.ioctx.application_list())
+
+        self.ioctx.application_enable("app1")
+        assert_raises(Error, self.ioctx.application_enable, "app2")
+        self.ioctx.application_enable("app2", True)
+
+        assert_raises(Error, self.ioctx.application_metadata_list, "dne")
+        eq([], self.ioctx.application_metadata_list("app1"))
+
+        assert_raises(Error, self.ioctx.application_metadata_set, "dne", "key",
+                      "key")
+        self.ioctx.application_metadata_set("app1", "key1", "val1")
+        self.ioctx.application_metadata_set("app1", "key2", "val2")
+        self.ioctx.application_metadata_set("app2", "key1", "val1")
+
+        eq([("key1", "val1"), ("key2", "val2")],
+           self.ioctx.application_metadata_list("app1"))
+
+        self.ioctx.application_metadata_remove("app1", "key1")
+        eq([("key2", "val2")], self.ioctx.application_metadata_list("app1"))
+
+    def test_service_daemon(self):
+        name = "pid-" + str(os.getpid())
+        metadata = {'version': '3.14', 'memory': '42'}
+        self.rados.service_daemon_register("laundry", name, metadata)
+        status = {'result': 'unknown', 'test': 'running'}
+        self.rados.service_daemon_update(status)
+
+class TestIoctx2(object):
+
+    def setUp(self):
+        self.rados = Rados(conffile='')
+        self.rados.connect()
+        self.rados.create_pool('test_pool')
+        assert self.rados.pool_exists('test_pool')
+        pool_id = self.rados.pool_lookup('test_pool')
+        assert pool_id > 0
+        self.ioctx2 = self.rados.open_ioctx2(pool_id)
+
+    def tearDown(self):
+        cmd = {"prefix": "osd unset", "key": "noup"}
+        self.rados.mon_command(json.dumps(cmd), b'')
+        self.ioctx2.close()
+        self.rados.delete_pool('test_pool')
+        self.rados.shutdown()
+
+    def test_get_last_version(self):
+        version = self.ioctx2.get_last_version()
+        assert version >= 0
+
+    def test_get_stats(self):
+        stats = self.ioctx2.get_stats()
+        eq(stats, {'num_objects_unfound': 0,
+                   'num_objects_missing_on_primary': 0,
+                   'num_object_clones': 0,
+                   'num_objects': 0,
+                   'num_object_copies': 0,
+                   'num_bytes': 0,
+                   'num_rd_kb': 0,
+                   'num_wr_kb': 0,
+                   'num_kb': 0,
+                   'num_wr': 0,
+                   'num_objects_degraded': 0,
+                   'num_rd': 0})
+
+    def test_change_auid(self):
+        self.ioctx2.change_auid(ANONYMOUS_AUID)
+        self.ioctx2.change_auid(ADMIN_AUID)
+
 
 class TestObject(object):
 

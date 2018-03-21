@@ -8,7 +8,7 @@ For the actual configuration guide for CephFS, please see the instructions
 at :doc:`/cephfs/index`.
 
 Which Ceph version?
-===================
+-------------------
 
 Use at least the Jewel (v10.2.0) release of Ceph.  This is the first
 release to include stable CephFS code and fsck/repair tools.  Make sure
@@ -20,7 +20,7 @@ appropriate kernel version if you are using the kernel client
 for CephFS.
 
 Most stable configuration
-=========================
+-------------------------
 
 Some features in CephFS are still experimental.  See
 :doc:`/cephfs/experimental-features` for guidance on these.
@@ -30,14 +30,15 @@ and **do not use snapshots**.  Both of these are the default.
 
 Note that creating multiple MDS daemons is fine, as these will simply be
 used as standbys.  However, for best stability you should avoid
-adjusting ``max_mds`` upwards, as this would cause multiple
+adjusting ``max_mds`` upwards, as this would cause multiple MDS
 daemons to be active at once.
 
 Which client?
-=============
+-------------
 
-The fuse client is the easiest way to get up to date code, while
-the kernel client will often give better performance.
+The FUSE client is the most accessible and the easiest to upgrade to the
+version of Ceph used by the storage cluster, while the kernel client will
+often give better performance.
 
 The clients do not always provide equivalent functionality, for example
 the fuse client supports client-enforced quotas while the kernel client
@@ -69,7 +70,7 @@ includes CephFS support, as in this case the distributor will be responsible
 for backporting fixes to their stable kernel: check with your vendor.
 
 Reporting issues
-================
+----------------
 
 If you have identified a specific issue, please report it with as much
 information as possible.  Especially important information:
@@ -83,6 +84,5 @@ information as possible.  Especially important information:
 * Any backtraces in the ceph logs from crashes
 
 If you are satisfied that you have found a bug, please file it on
-http://tracker.ceph.com.  For more general queries please write
-to the ceph-users mailing list.
-
+`the tracker <http://tracker.ceph.com>`_.  For more general queries please write
+to the `ceph-users mailing list <http://lists.ceph.com/listinfo.cgi/ceph-users-ceph.com/>`_.

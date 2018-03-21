@@ -32,6 +32,7 @@
 #include "JournalTool.h"
 
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
 #define dout_prefix *_dout << __func__ << ": "
@@ -48,7 +49,8 @@ void JournalTool::usage()
     << "      export <path>\n"
     << "      reset [--force]\n"
     << "  cephfs-journal-tool [options] header <get|set <field> <value>\n"
-    << "  cephfs-journal-tool [options] event <effect> <selector> <output>\n"
+    << "    <field>: [trimmed_pos|expire_pos|write_pos|pool_id]"
+    << "  cephfs-journal-tool [options] event <effect> <selector> <output> [special options]\n"
     << "    <selector>:\n"
     << "      --range=<start>..<end>\n"
     << "      --path=<substring>\n"
@@ -56,11 +58,20 @@ void JournalTool::usage()
     << "      --type=<UPDATE|OPEN|SESSION...><\n"
     << "      --frag=<ino>.<frag> [--dname=<dentry string>]\n"
     << "      --client=<session id integer>\n"
-    << "    <effect>: [get|apply|recover_dentries|splice]\n"
+    << "    <effect>: [get|recover_dentries|splice]\n"
     << "    <output>: [summary|list|binary|json] [--path <path>]\n"
     << "\n"
-    << "Options:\n"
-    << "  --rank=<str>  Journal rank (default 0)\n";
+    << "General options:\n"
+    << "  --rank=filesystem:mds-rank  Journal rank (required if multiple\n"
+    << "                              file systems, default is rank 0 on\n"
+    << "                              the only filesystem otherwise.)\n"
+    << "  --journal=<mdlog|purge_queue>  Journal type (purge_queue means\n"
+    << "                                 this journal is used to queue for purge operation,\n"
+    << "                                 default is mdlog, and only mdlog support event mode)\n" 
+    << "\n"
+    << "Special options\n"
+    << "  --alternate-pool <name>     Alternative metadata pool to target\n"
+    << "                              when using recover_dentries.\n";
 
   generic_client_usage();
 }
@@ -84,14 +95,26 @@ int JournalTool::main(std::vector<const char*> &argv)
   std::vector<const char*>::iterator arg = argv.begin();
 
   std::string rank_str;
-  if(!ceph_argparse_witharg(argv, arg, &rank_str, "--rank", (char*)NULL)) {
+  if (!ceph_argparse_witharg(argv, arg, &rank_str, "--rank", (char*)NULL)) {
     // Default: act on rank 0.  Will give the user an error if they
     // try invoking this way when they have more than one filesystem.
     rank_str = "0";
   }
 
+  if (!ceph_argparse_witharg(argv, arg, &type, "--journal", (char*)NULL)) {
+    // Default is mdlog
+    type = "mdlog";
+  }
+  
+  r = validate_type(type);
+  if (r != 0) {
+    derr << "journal type is not correct." << dendl;
+    return r;
+  }
+
   r = role_selector.parse(*fsmap, rank_str);
   if (r != 0) {
+    derr << "Couldn't determine MDS rank." << dendl;
     return r;
   }
 
@@ -130,11 +153,14 @@ int JournalTool::main(std::vector<const char*> &argv)
   }
 
   dout(4) << "JournalTool: creating IoCtx.." << dendl;
-  r = rados.ioctx_create(pool_name.c_str(), io);
+  r = rados.ioctx_create(pool_name.c_str(), input);
   assert(r == 0);
+  output.dup(input);
 
   // Execution
   // =========
+  // journal and header are general journal mode
+  // event mode is only specific for mdlog
   for (auto role : role_selector.get_roles()) {
     rank = role.rank;
     dout(4) << "Executing for rank " << rank << dendl;
@@ -142,7 +168,7 @@ int JournalTool::main(std::vector<const char*> &argv)
       r = main_journal(argv);
     } else if (mode == std::string("header")) {
       r = main_header(argv);
-    } else if (mode == std::string("event")) {
+    } else if (type == std::string("mdlog") && mode == std::string("event")) {
       r = main_event(argv);
     } else {
       derr << "Bad command '" << mode << "'" << dendl;
@@ -158,6 +184,13 @@ int JournalTool::main(std::vector<const char*> &argv)
   return r;
 }
 
+int JournalTool::validate_type(const std::string &type)
+{
+  if (type == "mdlog" || type == "purge_queue") {
+    return 0;
+  }
+  return -1;
+}
 
 /**
  * Handle arguments for 'journal' mode
@@ -208,7 +241,7 @@ int JournalTool::main_journal(std::vector<const char*> &argv)
 int JournalTool::main_header(std::vector<const char*> &argv)
 {
   JournalFilter filter;
-  JournalScanner js(io, rank, filter);
+  JournalScanner js(input, rank, type, filter);
   int r = js.scan(false);
   if (r < 0) {
     std::cerr << "Unable to scan journal" << std::endl;
@@ -268,6 +301,8 @@ int JournalTool::main_header(std::vector<const char*> &argv)
       field = &(js.header->expire_pos);
     } else if (field_name == "write_pos") {
       field = &(js.header->write_pos);
+    } else if (field_name == "pool_id") {
+      field = (uint64_t*)(&(js.header->layout.pool_id));
     } else {
       derr << "Invalid field '" << field_name << "'" << dendl;
       return -EINVAL;
@@ -278,8 +313,8 @@ int JournalTool::main_header(std::vector<const char*> &argv)
 
     dout(4) << "Writing object..." << dendl;
     bufferlist header_bl;
-    ::encode(*(js.header), header_bl);
-    io.write_full(js.obj_name(0), header_bl);
+    encode(*(js.header), header_bl);
+    output.write_full(js.obj_name(0), header_bl);
     dout(4) << "Write complete." << dendl;
     std::cout << "Successfully updated header." << std::endl;
   } else {
@@ -303,7 +338,7 @@ int JournalTool::main_event(std::vector<const char*> &argv)
   std::vector<const char*>::iterator arg = argv.begin();
 
   std::string command = *(arg++);
-  if (command != "get" && command != "apply" && command != "splice" && command != "recover_dentries") {
+  if (command != "get" && command != "splice" && command != "recover_dentries") {
     derr << "Unknown argument '" << command << "'" << dendl;
     usage();
     return -EINVAL;
@@ -342,6 +377,12 @@ int JournalTool::main_event(std::vector<const char*> &argv)
     std::string arg_str;
     if (ceph_argparse_witharg(argv, arg, &arg_str, "--path", (char*)NULL)) {
       output_path = arg_str;
+    } else if (ceph_argparse_witharg(argv, arg, &arg_str, "--alternate-pool",
+				     nullptr)) {
+      dout(1) << "Using alternate pool " << arg_str << dendl;
+      int r = rados.ioctx_create(arg_str.c_str(), output);
+      assert(r == 0);
+      other_pool = true;
     } else {
       derr << "Unknown argument: '" << *arg << "'" << dendl;
       usage();
@@ -351,31 +392,12 @@ int JournalTool::main_event(std::vector<const char*> &argv)
 
   // Execute command
   // ===============
-  JournalScanner js(io, rank, filter);
+  JournalScanner js(input, rank, type, filter);
   if (command == "get") {
     r = js.scan();
     if (r) {
       derr << "Failed to scan journal (" << cpp_strerror(r) << ")" << dendl;
       return r;
-    }
-  } else if (command == "apply") {
-    r = js.scan();
-    if (r) {
-      derr << "Failed to scan journal (" << cpp_strerror(r) << ")" << dendl;
-      return r;
-    }
-
-    bool dry_run = false;
-    if (arg != argv.end() && ceph_argparse_flag(argv, arg, "--dry_run", (char*)NULL)) {
-      dry_run = true;
-    }
-
-    for (JournalScanner::EventMap::iterator i = js.events.begin(); i != js.events.end(); ++i) {
-      LogEvent *le = i->second.log_event;
-      EMetaBlob const *mb = le->get_metablob();
-      if (mb) {
-        replay_offline(*mb, dry_run);
-      }
     }
   } else if (command == "recover_dentries") {
     r = js.scan();
@@ -398,7 +420,7 @@ int JournalTool::main_event(std::vector<const char*> &argv)
       LogEvent *le = i->second.log_event;
       EMetaBlob const *mb = le->get_metablob();
       if (mb) {
-        int scav_r = scavenge_dentries(*mb, dry_run, &consumed_inos);
+        int scav_r = recover_dentries(*mb, dry_run, &consumed_inos);
         if (scav_r) {
           dout(1) << "Error processing event 0x" << std::hex << i->first << std::dec
                   << ": " << cpp_strerror(scav_r) << ", continuing..." << dendl;
@@ -426,6 +448,24 @@ int JournalTool::main_event(std::vector<const char*> &argv)
           r = consume_r;
         }
       }
+    }
+
+    // Remove consumed dentries from lost+found.
+    if (other_pool && !dry_run) {
+      std::set<std::string> found;
+
+      for (auto i : consumed_inos) {
+	char s[20];
+
+	snprintf(s, sizeof(s), "%llx_head", (unsigned long long) i);
+	dout(20) << "removing " << s << dendl;
+	found.insert(std::string(s));
+      }
+
+      object_t frag_oid;
+      frag_oid = InodeStore::get_object_name(CEPH_INO_LOST_AND_FOUND,
+					     frag_t(), "");
+      output.omap_rm_keys(frag_oid.name, found);
     }
   } else if (command == "splice") {
     r = js.scan();
@@ -499,7 +539,7 @@ int JournalTool::journal_inspect()
   int r;
 
   JournalFilter filter;
-  JournalScanner js(io, rank, filter);
+  JournalScanner js(input, rank, type, filter);
   r = js.scan();
   if (r) {
     std::cerr << "Failed to scan journal (" << cpp_strerror(r) << ")" << std::endl;
@@ -523,7 +563,7 @@ int JournalTool::journal_inspect()
 int JournalTool::journal_export(std::string const &path, bool import)
 {
   int r = 0;
-  JournalScanner js(io, rank);
+  JournalScanner js(input, rank, type);
 
   if (!import) {
     /*
@@ -546,7 +586,7 @@ int JournalTool::journal_export(std::string const &path, bool import)
    */
   {
     Dumper dumper;
-    r = dumper.init(mds_role_t(role_selector.get_ns(), rank));
+    r = dumper.init(mds_role_t(role_selector.get_ns(), rank), type);
     if (r < 0) {
       derr << "dumper::init failed: " << cpp_strerror(r) << dendl;
       return r;
@@ -556,7 +596,6 @@ int JournalTool::journal_export(std::string const &path, bool import)
     } else {
       r = dumper.dump(path.c_str());
     }
-    dumper.shutdown();
   }
 
   return r;
@@ -570,18 +609,17 @@ int JournalTool::journal_reset(bool hard)
 {
   int r = 0;
   Resetter resetter;
-  r = resetter.init();
+  r = resetter.init(mds_role_t(role_selector.get_ns(), rank), type, hard);
   if (r < 0) {
     derr << "resetter::init failed: " << cpp_strerror(r) << dendl;
     return r;
   }
 
   if (hard) {
-    r = resetter.reset_hard(mds_role_t(role_selector.get_ns(), rank));
+    r = resetter.reset_hard();
   } else {
-    r = resetter.reset(mds_role_t(role_selector.get_ns(), rank));
+    r = resetter.reset();
   }
-  resetter.shutdown();
 
   return r;
 }
@@ -604,7 +642,7 @@ int JournalTool::journal_reset(bool hard)
  * @param consumed_inos output, populated with any inos inserted
  * @returns 0 on success, else negative error code
  */
-int JournalTool::scavenge_dentries(
+int JournalTool::recover_dentries(
     EMetaBlob const &metablob,
     bool const dry_run,
     std::set<inodeno_t> *consumed_inos)
@@ -633,7 +671,7 @@ int JournalTool::scavenge_dentries(
     // Update fnode in omap header of dirfrag object
     bool write_fnode = false;
     bufferlist old_fnode_bl;
-    r = io.omap_get_header(frag_oid.name, &old_fnode_bl);
+    r = input.omap_get_header(frag_oid.name, &old_fnode_bl);
     if (r == -ENOENT) {
       // Creating dirfrag from scratch
       dout(4) << "failed to read OMAP header from directory fragment "
@@ -663,11 +701,13 @@ int JournalTool::scavenge_dentries(
       return r;
     }
 
-    if (write_fnode && !dry_run) {
+    if ((other_pool || write_fnode) && !dry_run) {
       dout(4) << "writing fnode to omap header" << dendl;
       bufferlist fnode_bl;
       lump.fnode.encode(fnode_bl);
-      r = io.omap_set_header(frag_oid.name, fnode_bl);
+      if (!other_pool || frag.ino >= MDS_INO_SYSTEM_BASE) {
+	r = output.omap_set_header(frag_oid.name, fnode_bl);
+      }
       if (r != 0) {
         derr << "Failed to write fnode for frag object "
              << frag_oid.name << dendl;
@@ -704,9 +744,21 @@ int JournalTool::scavenge_dentries(
       read_keys.insert(key);
     }
 
+    list<EMetaBlob::nullbit> const &nb_list = lump.get_dnull();
+    for (auto& nb : nb_list) {
+      // Get a key like "foobar_head"
+      std::string key;
+      dentry_key_t dn_key(nb.dnlast, nb.dn.c_str());
+      dn_key.encode(key);
+      read_keys.insert(key);
+    }
+
     // Perform bulk read of existing dentries
     std::map<std::string, bufferlist> read_vals;
-    r = io.omap_get_vals_by_keys(frag_oid.name, read_keys, &read_vals);
+    r = input.omap_get_vals_by_keys(frag_oid.name, read_keys, &read_vals);
+    if (r == -ENOENT && other_pool) {
+      r = output.omap_get_vals_by_keys(frag_oid.name, read_keys, &read_vals);
+    }
     if (r != 0) {
       derr << "unexpected error reading fragment object "
            << frag_oid.name << ": " << cpp_strerror(r) << dendl;
@@ -738,9 +790,9 @@ int JournalTool::scavenge_dentries(
         bufferlist::iterator q = old_dentry.begin();
 
         snapid_t dnfirst;
-        ::decode(dnfirst, q);
+        decode(dnfirst, q);
         char dentry_type;
-        ::decode(dentry_type, q);
+        decode(dentry_type, q);
 
         if (dentry_type == 'L') {
           // leave write_dentry false, we have no version to
@@ -768,14 +820,14 @@ int JournalTool::scavenge_dentries(
         }
       }
 
-      if (write_dentry && !dry_run) {
+      if ((other_pool || write_dentry) && !dry_run) {
         dout(4) << "writing I dentry " << key << " into frag "
           << frag_oid.name << dendl;
 
         // Compose: Dentry format is dnfirst, [I|L], InodeStore(bare=true)
         bufferlist dentry_bl;
-        ::encode(fb.dnfirst, dentry_bl);
-        ::encode('I', dentry_bl);
+        encode(fb.dnfirst, dentry_bl);
+        encode('I', dentry_bl);
         encode_fullbit_as_inode(fb, true, &dentry_bl);
 
         // Record for writing to RADOS
@@ -807,9 +859,9 @@ int JournalTool::scavenge_dentries(
         bufferlist::iterator q = old_dentry.begin();
 
         snapid_t dnfirst;
-        ::decode(dnfirst, q);
+        decode(dnfirst, q);
         char dentry_type;
-        ::decode(dentry_type, q);
+        decode(dentry_type, q);
 
         if (dentry_type == 'L') {
           dout(10) << "Existing hardlink inode in slot to be (maybe) written "
@@ -830,16 +882,16 @@ int JournalTool::scavenge_dentries(
         }
       }
 
-      if (write_dentry && !dry_run) {
+      if ((other_pool || write_dentry) && !dry_run) {
         dout(4) << "writing L dentry " << key << " into frag "
           << frag_oid.name << dendl;
 
         // Compose: Dentry format is dnfirst, [I|L], InodeStore(bare=true)
         bufferlist dentry_bl;
-        ::encode(rb.dnfirst, dentry_bl);
-        ::encode('L', dentry_bl);
-        ::encode(rb.ino, dentry_bl);
-        ::encode(rb.d_type, dentry_bl);
+        encode(rb.dnfirst, dentry_bl);
+        encode('L', dentry_bl);
+        encode(rb.ino, dentry_bl);
+        encode(rb.d_type, dentry_bl);
 
         // Record for writing to RADOS
         write_vals[key] = dentry_bl;
@@ -847,14 +899,66 @@ int JournalTool::scavenge_dentries(
       }
     }
 
+    std::set<std::string> null_vals;
+    for (auto& nb : nb_list) {
+      std::string key;
+      dentry_key_t dn_key(nb.dnlast, nb.dn.c_str());
+      dn_key.encode(key);
+
+      dout(4) << "inspecting nullbit " << frag_oid.name << "/" << nb.dn
+	<< dendl;
+
+      auto it = read_vals.find(key);
+      if (it != read_vals.end()) {
+	dout(4) << "dentry exists, will remove" << dendl;
+
+	bufferlist::iterator q = it->second.begin();
+	snapid_t dnfirst;
+	decode(dnfirst, q);
+	char dentry_type;
+	decode(dentry_type, q);
+
+	bool remove_dentry = false;
+	if (dentry_type == 'L') {
+	  dout(10) << "Existing hardlink inode in slot to be (maybe) removed "
+	    << "by null journal dn '" << nb.dn.c_str()
+	    << "' with lump fnode version " << lump.fnode.version
+	    << "vs existing fnode version " << old_fnode_version << dendl;
+	  remove_dentry = old_fnode_version < lump.fnode.version;
+	} else if (dentry_type == 'I') {
+	  dout(10) << "Existing full inode in slot to be (maybe) removed "
+	    << "by null journal dn '" << nb.dn.c_str()
+	    << "' with lump fnode version " << lump.fnode.version
+	    << "vs existing fnode version " << old_fnode_version << dendl;
+	  remove_dentry = old_fnode_version < lump.fnode.version;
+	} else {
+	  dout(4) << "corrupt dentry in backing store, will remove" << dendl;
+	  remove_dentry = true;
+	}
+
+	if (remove_dentry)
+	  null_vals.insert(key);
+      }
+    }
+
     // Write back any new/changed dentries
     if (!write_vals.empty()) {
-        r = io.omap_set(frag_oid.name, write_vals);
-        if (r != 0) {
-          derr << "error writing dentries to " << frag_oid.name
-              << ": " << cpp_strerror(r) << dendl;
-          return r;
-        }
+      r = output.omap_set(frag_oid.name, write_vals);
+      if (r != 0) {
+	derr << "error writing dentries to " << frag_oid.name
+	     << ": " << cpp_strerror(r) << dendl;
+	return r;
+      }
+    }
+
+    // remove any null dentries
+    if (!null_vals.empty()) {
+      r = output.omap_rm_keys(frag_oid.name, null_vals);
+      if (r != 0) {
+	derr << "error removing dentries from " << frag_oid.name
+	  << ": " << cpp_strerror(r) << dendl;
+	return r;
+      }
     }
   }
 
@@ -875,7 +979,7 @@ int JournalTool::scavenge_dentries(
 
     bool write_root_ino = false;
     bufferlist old_root_ino_bl;
-    r = io.read(root_oid.name, old_root_ino_bl, (1<<22), 0);
+    r = input.read(root_oid.name, old_root_ino_bl, (1<<22), 0);
     if (r == -ENOENT) {
       dout(4) << "root does not exist, will create" << dendl;
       write_root_ino = true;
@@ -886,7 +990,7 @@ int JournalTool::scavenge_dentries(
         << ")" << dendl;
       bufferlist::iterator inode_bl_iter = old_root_ino_bl.begin(); 
       std::string magic;
-      ::decode(magic, inode_bl_iter);
+      decode(magic, inode_bl_iter);
       if (magic == CEPH_FS_ONDISK_MAGIC) {
         dout(4) << "magic ok" << dendl;
         old_inode.decode(inode_bl_iter);
@@ -910,11 +1014,11 @@ int JournalTool::scavenge_dentries(
 
       // Compose: root ino format is magic,InodeStore(bare=false)
       bufferlist new_root_ino_bl;
-      ::encode(std::string(CEPH_FS_ONDISK_MAGIC), new_root_ino_bl);
+      encode(std::string(CEPH_FS_ONDISK_MAGIC), new_root_ino_bl);
       encode_fullbit_as_inode(fb, false, &new_root_ino_bl);
 
       // Write to RADOS
-      r = io.write_full(root_oid.name, new_root_ino_bl);
+      r = output.write_full(root_oid.name, new_root_ino_bl);
       if (r != 0) {
         derr << "error writing inode object " << root_oid.name
               << ": " << cpp_strerror(r) << dendl;
@@ -924,176 +1028,6 @@ int JournalTool::scavenge_dentries(
   }
 
   return r;
-}
-
-
-int JournalTool::replay_offline(EMetaBlob const &metablob, bool const dry_run)
-{
-  int r;
-
-  // Replay roots
-  for (list<ceph::shared_ptr<EMetaBlob::fullbit> >::const_iterator p = metablob.roots.begin(); p != metablob.roots.end(); ++p) {
-    EMetaBlob::fullbit const &fb = *(*p);
-    inodeno_t ino = fb.inode.ino;
-    dout(4) << "updating root 0x" << std::hex << ino << std::dec << dendl;
-
-    object_t root_oid = InodeStore::get_object_name(ino, frag_t(), ".inode");
-    dout(4) << "object id " << root_oid.name << dendl;
-
-    bufferlist inode_bl;
-    r = io.read(root_oid.name, inode_bl, (1<<22), 0);
-    InodeStore inode;
-    if (r == -ENOENT) {
-      dout(4) << "root does not exist, will create" << dendl;
-    } else {
-      dout(4) << "root exists, will modify (" << inode_bl.length() << ")" << dendl;
-      // TODO: add some kind of force option so that we can overwrite bad inodes
-      // from the journal if needed
-      bufferlist::iterator inode_bl_iter = inode_bl.begin(); 
-      std::string magic;
-      ::decode(magic, inode_bl_iter);
-      if (magic == CEPH_FS_ONDISK_MAGIC) {
-        dout(4) << "magic ok" << dendl;
-      } else {
-        dout(4) << "magic bad: '" << magic << "'" << dendl;
-      }
-      inode.decode(inode_bl_iter);
-    }
-
-    // This is a distant cousin of EMetaBlob::fullbit::update_inode, but for use
-    // on an offline InodeStore instance.  It's way simpler, because we are just
-    // uncritically hauling the data between structs.
-    inode.inode = fb.inode;
-    inode.xattrs = fb.xattrs;
-    inode.dirfragtree = fb.dirfragtree;
-    inode.snap_blob = fb.snapbl;
-    inode.symlink = fb.symlink;
-    inode.old_inodes = fb.old_inodes;
-
-    inode_bl.clear();
-    std::string magic = CEPH_FS_ONDISK_MAGIC;
-    ::encode(magic, inode_bl);
-    inode.encode(inode_bl, CEPH_FEATURES_SUPPORTED_DEFAULT);
-
-    if (!dry_run) {
-      r = io.write_full(root_oid.name, inode_bl);
-      assert(r == 0);
-    }
-  }
-
-
-
-  // TODO: respect metablob.renamed_dirino (cues us as to which dirlumps
-  // indicate renamed directories)
-
-  // Replay fullbits (dentry+inode)
-  for (list<dirfrag_t>::const_iterator lp = metablob.lump_order.begin(); lp != metablob.lump_order.end(); ++lp) {
-    dirfrag_t const &frag = *lp;
-    EMetaBlob::dirlump const &lump = metablob.lump_map.find(frag)->second;
-    lump._decode_bits();
-    object_t frag_object_id = InodeStore::get_object_name(frag.ino, frag.frag, "");
-
-    // Check for presence of dirfrag object
-    uint64_t psize;
-    time_t pmtime;
-    r = io.stat(frag_object_id.name, &psize, &pmtime);
-    if (r == -ENOENT) {
-      dout(4) << "Frag object " << frag_object_id.name << " did not exist, will create" << dendl;
-    } else if (r != 0) {
-      // FIXME: what else can happen here?  can I deal?
-      assert(r == 0);
-    } else {
-      dout(4) << "Frag object " << frag_object_id.name << " exists, will modify" << dendl;
-    }
-
-    // Write fnode to omap header of dirfrag object
-    bufferlist fnode_bl;
-    lump.fnode.encode(fnode_bl);
-    if (!dry_run) {
-      r = io.omap_set_header(frag_object_id.name, fnode_bl);
-      if (r != 0) {
-        derr << "Failed to write fnode for frag object " << frag_object_id.name << dendl;
-        return r;
-      }
-    }
-
-    // Try to get the existing dentry
-    list<ceph::shared_ptr<EMetaBlob::fullbit> > const &fb_list = lump.get_dfull();
-    for (list<ceph::shared_ptr<EMetaBlob::fullbit> >::const_iterator fbi = fb_list.begin(); fbi != fb_list.end(); ++fbi) {
-      EMetaBlob::fullbit const &fb = *(*fbi);
-
-      // Get a key like "foobar_head"
-      std::string key;
-      dentry_key_t dn_key(fb.dnlast, fb.dn.c_str());
-      dn_key.encode(key);
-
-      // See if the dentry is present
-      std::set<std::string> keys;
-      keys.insert(key);
-      std::map<std::string, bufferlist> vals;
-      r = io.omap_get_vals_by_keys(frag_object_id.name, keys, &vals);
-      assert (r == 0);  // I assume success because I checked object existed and absence of 
-                        // dentry gives me empty map instead of failure
-                        // FIXME handle failures so we can replay other events
-                        // if this one is causing some unexpected issue
-    
-      if (vals.find(key) == vals.end()) {
-        dout(4) << "dentry " << key << " does not exist, will be created" << dendl;
-      } else {
-        dout(4) << "dentry " << key << " existed already" << dendl;
-        // TODO: read out existing dentry before adding new one so that
-        // we can print a bit of info about what we're overwriting
-      }
-    
-      bufferlist dentry_bl;
-      ::encode(fb.dnfirst, dentry_bl);
-      ::encode('I', dentry_bl);
-
-      InodeStore inode;
-      inode.inode = fb.inode;
-      inode.xattrs = fb.xattrs;
-      inode.dirfragtree = fb.dirfragtree;
-      inode.snap_blob = fb.snapbl;
-      inode.symlink = fb.symlink;
-      inode.old_inodes = fb.old_inodes;
-      inode.encode_bare(dentry_bl, CEPH_FEATURES_SUPPORTED_DEFAULT);
-      
-      vals[key] = dentry_bl;
-      if (!dry_run) {
-        r = io.omap_set(frag_object_id.name, vals);
-        assert(r == 0);  // FIXME handle failures
-      }
-    }
-
-    // Replay nullbits: removal of dentries
-    list<EMetaBlob::nullbit> const &nb_list = lump.get_dnull();
-    for (list<EMetaBlob::nullbit>::const_iterator
-	iter = nb_list.begin(); iter != nb_list.end(); ++iter) {
-      EMetaBlob::nullbit const &nb = *iter;
-
-      // Get a key like "foobar_head"
-      std::string key;
-      dentry_key_t dn_key(nb.dnlast, nb.dn.c_str());
-      dn_key.encode(key);
-
-      // Remove it from the dirfrag
-      dout(4) << "Removing dentry " << key << dendl;
-      std::set<std::string> keys;
-      keys.insert(key);
-      if (!dry_run) {
-        r = io.omap_rm_keys(frag_object_id.name, keys);
-        assert(r == 0);
-      }
-    }
-  }
-
-  for (std::vector<inodeno_t>::const_iterator i = metablob.destroyed_inodes.begin();
-       i != metablob.destroyed_inodes.end(); ++i) {
-    dout(4) << "Destroyed inode: " << *i << dendl;
-    // TODO: if it was a dir, then delete its dirfrag objects
-  }
-
-  return 0;
 }
 
 
@@ -1150,7 +1084,7 @@ int JournalTool::erase_region(JournalScanner const &js, uint64_t const pos, uint
     uint32_t offset_in_obj = write_offset % object_size;
     uint32_t write_len = min(log_data.length(), object_size - offset_in_obj);
 
-    r = io.write(oid, log_data, write_len, offset_in_obj);
+    r = output.write(oid, log_data, write_len, offset_in_obj);
     if (r < 0) {
       return r;
     } else {
@@ -1236,7 +1170,7 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
 
     // Read object
     bufferlist inotable_bl;
-    int read_r = io.read(inotable_oid.name, inotable_bl, (1<<22), 0);
+    int read_r = input.read(inotable_oid.name, inotable_bl, (1<<22), 0);
     if (read_r < 0) {
       // Things are really bad if we can't read inotable.  Beyond our powers.
       derr << "unable to read inotable '" << inotable_oid.name << "': "
@@ -1248,7 +1182,7 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
     // Deserialize InoTable
     version_t inotable_ver;
     bufferlist::iterator q = inotable_bl.begin();
-    ::decode(inotable_ver, q);
+    decode(inotable_ver, q);
     InoTable ino_table(NULL);
     ino_table.decode(q);
     
@@ -1270,9 +1204,9 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
       inotable_ver += 1;
       dout(4) << "writing modified inotable version " << inotable_ver << dendl;
       bufferlist inotable_new_bl;
-      ::encode(inotable_ver, inotable_new_bl);
+      encode(inotable_ver, inotable_new_bl);
       ino_table.encode_state(inotable_new_bl);
-      int write_r = io.write_full(inotable_oid.name, inotable_new_bl);
+      int write_r = output.write_full(inotable_oid.name, inotable_new_bl);
       if (write_r != 0) {
         derr << "error writing modified inotable " << inotable_oid.name
           << ": " << cpp_strerror(write_r) << dendl;

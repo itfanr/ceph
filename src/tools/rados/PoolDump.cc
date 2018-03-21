@@ -19,6 +19,7 @@
 
 using namespace librados;
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rados
 
 /**
@@ -86,7 +87,6 @@ int PoolDump::dump(IoCtx *io_ctx)
 
       if (outdata.length() < op_size) {
         // No more data
-        r = 0;
         break;
       }
       offset += outdata.length();
@@ -150,7 +150,6 @@ int PoolDump::dump(IoCtx *io_ctx)
       }
       r = values.size();
     } while (r == MAX_READ);
-    r = 0;
 
     // Close object
     // =============

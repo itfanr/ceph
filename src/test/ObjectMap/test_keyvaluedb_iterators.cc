@@ -33,7 +33,7 @@ public:
   boost::scoped_ptr<KeyValueDB> db;
   boost::scoped_ptr<KeyValueDBMemory> mock;
 
-  virtual void SetUp() {
+  void SetUp() override {
     assert(!store_path.empty());
 
     KeyValueDB *db_ptr = KeyValueDB::create(g_ceph_context, "leveldb", store_path);
@@ -42,10 +42,10 @@ public:
     mock.reset(new KeyValueDBMemory());
   }
 
-  virtual void TearDown() { }
+  void TearDown() override { }
 
   ::testing::AssertionResult validate_db_clear(KeyValueDB *store) {
-    KeyValueDB::WholeSpaceIterator it = store->get_iterator();
+    KeyValueDB::WholeSpaceIterator it = store->get_wholespace_iterator();
     it->seek_to_first();
     while (it->valid()) {
       pair<string,string> k = it->raw_key();
@@ -61,7 +61,7 @@ public:
   }
 
   ::testing::AssertionResult validate_db_match() {
-    KeyValueDB::WholeSpaceIterator it = db->get_iterator();
+    KeyValueDB::WholeSpaceIterator it = db->get_wholespace_iterator();
     it->seek_to_first();
     while (it->valid()) {
       pair<string, string> k = it->raw_key();
@@ -198,7 +198,7 @@ public:
   }
 
   void clear(KeyValueDB *store) {
-    KeyValueDB::WholeSpaceIterator it = store->get_snapshot_iterator();
+    KeyValueDB::WholeSpaceIterator it = store->get_wholespace_iterator();
     it->seek_to_first();
     KeyValueDB::Transaction t = store->get_transaction();
     while (it->valid()) {
@@ -244,7 +244,7 @@ public:
   }
 
   void print_db(KeyValueDB *store) {
-    KeyValueDB::WholeSpaceIterator it = store->get_iterator();
+    KeyValueDB::WholeSpaceIterator it = store->get_wholespace_iterator();
     it->seek_to_first();
     print_iterator(it);
   }
@@ -274,7 +274,7 @@ public:
     db->submit_transaction_sync(tx);
   }
 
-  virtual void SetUp() {
+  void SetUp() override {
     IteratorTest::SetUp();
 
     prefix1 = "_PREFIX_1_";
@@ -292,7 +292,7 @@ public:
     ASSERT_TRUE(validate_db_match());
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     IteratorTest::TearDown();
   }
 
@@ -310,7 +310,7 @@ public:
     store->submit_transaction_sync(tx);
 
     deque<string> key_deque;
-    KeyValueDB::WholeSpaceIterator iter = store->get_iterator();
+    KeyValueDB::WholeSpaceIterator iter = store->get_wholespace_iterator();
     iter->seek_to_first();
 
     // check for prefix1
@@ -341,7 +341,7 @@ public:
     tx->rmkeys_by_prefix(prefix1);
     store->submit_transaction_sync(tx);
 
-    iter = store->get_iterator();
+    iter = store->get_wholespace_iterator();
     iter->seek_to_first();
 
     // check for prefix2
@@ -373,7 +373,7 @@ public:
     tx->rmkeys_by_prefix(prefix3);
     store->submit_transaction_sync(tx);
 
-    iter = store->get_iterator();
+    iter = store->get_wholespace_iterator();
     iter->seek_to_first();
 
     // check for prefix1
@@ -444,7 +444,7 @@ public:
     ASSERT_FALSE(iter->valid());
 
     // make sure those keys were removed from the store
-    KeyValueDB::WholeSpaceIterator tmp_it = store->get_iterator();
+    KeyValueDB::WholeSpaceIterator tmp_it = store->get_wholespace_iterator();
     tmp_it->seek_to_first();
     ASSERT_TRUE(tmp_it->valid());
 
@@ -513,7 +513,7 @@ TEST_F(RmKeysTest, RmKeysByPrefixMockDB)
 TEST_F(RmKeysTest, RmKeysWhileIteratingLevelDB)
 {
   SCOPED_TRACE("LevelDB -- WholeSpaceIterator");
-  RmKeysWhileIteratingSnapshot(db.get(), db->get_iterator());
+  RmKeysWhileIteratingSnapshot(db.get(), db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
@@ -521,20 +521,6 @@ TEST_F(RmKeysTest, RmKeysWhileIteratingMockDB)
 {
   std::cout << "There is no safe way to test key removal while iterating\n"
 	    << "over the mock store without using snapshots" << std::endl;
-}
-
-TEST_F(RmKeysTest, RmKeysWhileIteratingSnapshotLevelDB)
-{
-  SCOPED_TRACE("LevelDB -- WholeSpaceSnapshotIterator");
-  RmKeysWhileIteratingSnapshot(db.get(), db->get_snapshot_iterator());
-  ASSERT_FALSE(HasFatalFailure());
-}
-
-TEST_F(RmKeysTest, RmKeysWhileIteratingSnapshotMockDB)
-{
-  SCOPED_TRACE("Mock DB -- WholeSpaceSnapshotIterator");
-  RmKeysWhileIteratingSnapshot(mock.get(), mock->get_snapshot_iterator());
-  ASSERT_FALSE(HasFatalFailure());
 }
 
 // ------- Set Keys / Update Values -------
@@ -557,7 +543,7 @@ public:
     db->submit_transaction_sync(tx);
   }
 
-  virtual void SetUp() {
+  void SetUp() override {
     IteratorTest::SetUp();
 
     prefix1 = "_PREFIX_1_";
@@ -574,7 +560,7 @@ public:
     ASSERT_TRUE(validate_db_match());
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     IteratorTest::TearDown();
   }
 
@@ -735,7 +721,7 @@ public:
 				  "zzz", _gen_val_str("zzz")));
 
     // check those values were really changed in the store
-    KeyValueDB::WholeSpaceIterator tmp_iter = store->get_iterator();
+    KeyValueDB::WholeSpaceIterator tmp_iter = store->get_wholespace_iterator();
     tmp_iter->seek_to_first();
     ASSERT_TRUE(tmp_iter->valid());
     ASSERT_TRUE(validate_iterator(tmp_iter, prefix1,
@@ -752,59 +738,30 @@ public:
 TEST_F(SetKeysTest, DISABLED_SetKeysWhileIteratingLevelDB)
 {
   SCOPED_TRACE("LevelDB: SetKeysWhileIteratingLevelDB");
-  SetKeysWhileIterating(db.get(), db->get_iterator());
+  SetKeysWhileIterating(db.get(), db->get_wholespace_iterator());
   ASSERT_TRUE(HasFatalFailure());
 }
 
 TEST_F(SetKeysTest, SetKeysWhileIteratingMockDB)
 {
   SCOPED_TRACE("Mock DB: SetKeysWhileIteratingMockDB");
-  SetKeysWhileIterating(mock.get(), mock->get_iterator());
-  ASSERT_FALSE(HasFatalFailure());
-}
-
-TEST_F(SetKeysTest, SetKeysWhileIteratingSnapshotLevelDB)
-{
-  SCOPED_TRACE("LevelDB: SetKeysWhileIteratingSnapshotLevelDB");
-  SetKeysWhileIteratingSnapshot(db.get(), db->get_snapshot_iterator());
-  ASSERT_FALSE(HasFatalFailure());
-}
-
-TEST_F(SetKeysTest, SetKeysWhileIteratingSnapshotMockDB)
-{
-  SCOPED_TRACE("MockDB: SetKeysWhileIteratingSnapshotMockDB");
-  SetKeysWhileIteratingSnapshot(mock.get(), mock->get_snapshot_iterator());
+  SetKeysWhileIterating(mock.get(), mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SetKeysTest, DISABLED_UpdateValuesWhileIteratingLevelDB)
 {
   SCOPED_TRACE("LevelDB: UpdateValuesWhileIteratingLevelDB");
-  UpdateValuesWhileIterating(db.get(), db->get_iterator());
+  UpdateValuesWhileIterating(db.get(), db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SetKeysTest, UpdateValuesWhileIteratingMockDB)
 {
   SCOPED_TRACE("MockDB: UpdateValuesWhileIteratingMockDB");
-  UpdateValuesWhileIterating(mock.get(), mock->get_iterator());
+  UpdateValuesWhileIterating(mock.get(), mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
-
-TEST_F(SetKeysTest, UpdateValuesWhileIteratingSnapshotLevelDB)
-{
-  SCOPED_TRACE("LevelDB: UpdateValuesWhileIteratingSnapshotLevelDB");
-  UpdateValuesWhileIteratingSnapshot(db.get(), db->get_snapshot_iterator());
-  ASSERT_FALSE(HasFatalFailure());
-}
-
-TEST_F(SetKeysTest, UpdateValuesWhileIteratingSnapshotMockDB)
-{
-  SCOPED_TRACE("MockDB: UpdateValuesWhileIteratingSnapshotMockDB");
-  UpdateValuesWhileIteratingSnapshot(mock.get(), mock->get_snapshot_iterator());
-  ASSERT_FALSE(HasFatalFailure());
-}
-
 
 class BoundsTest : public IteratorTest
 {
@@ -829,7 +786,7 @@ public:
     store->submit_transaction_sync(tx);
   }
 
-  virtual void SetUp() {
+  void SetUp() override {
     IteratorTest::SetUp();
 
     prefix1 = "_PREFIX_1_";
@@ -847,7 +804,7 @@ public:
     ASSERT_TRUE(validate_db_match());
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     IteratorTest::TearDown();
   }
 
@@ -1192,84 +1149,84 @@ public:
 TEST_F(BoundsTest, LowerBoundWithEmptyKeyOnWholeSpaceIteratorLevelDB)
 {
   SCOPED_TRACE("LevelDB: Lower Bound, Empty Key, Whole-Space Iterator");
-  LowerBoundWithEmptyKeyOnWholeSpaceIterator(db->get_iterator());
+  LowerBoundWithEmptyKeyOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, LowerBoundWithEmptyKeyOnWholeSpaceIteratorMockDB)
 {
   SCOPED_TRACE("MockDB: Lower Bound, Empty Key, Whole-Space Iterator");
-  LowerBoundWithEmptyKeyOnWholeSpaceIterator(mock->get_iterator());
+  LowerBoundWithEmptyKeyOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, LowerBoundWithEmptyPrefixOnWholeSpaceIteratorLevelDB)
 {
   SCOPED_TRACE("LevelDB: Lower Bound, Empty Prefix, Whole-Space Iterator");
-  LowerBoundWithEmptyPrefixOnWholeSpaceIterator(db->get_iterator());
+  LowerBoundWithEmptyPrefixOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, LowerBoundWithEmptyPrefixOnWholeSpaceIteratorMockDB)
 {
   SCOPED_TRACE("MockDB: Lower Bound, Empty Prefix, Whole-Space Iterator");
-  LowerBoundWithEmptyPrefixOnWholeSpaceIterator(mock->get_iterator());
+  LowerBoundWithEmptyPrefixOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, LowerBoundOnWholeSpaceIteratorLevelDB)
 {
   SCOPED_TRACE("LevelDB: Lower Bound, Whole-Space Iterator");
-  LowerBoundOnWholeSpaceIterator(db->get_iterator());
+  LowerBoundOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, LowerBoundOnWholeSpaceIteratorMockDB)
 {
   SCOPED_TRACE("MockDB: Lower Bound, Whole-Space Iterator");
-  LowerBoundOnWholeSpaceIterator(mock->get_iterator());
+  LowerBoundOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, UpperBoundWithEmptyKeyOnWholeSpaceIteratorLevelDB)
 {
   SCOPED_TRACE("LevelDB: Upper Bound, Empty Key, Whole-Space Iterator");
-  UpperBoundWithEmptyKeyOnWholeSpaceIterator(db->get_iterator());
+  UpperBoundWithEmptyKeyOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, UpperBoundWithEmptyKeyOnWholeSpaceIteratorMockDB)
 {
   SCOPED_TRACE("MockDB: Upper Bound, Empty Key, Whole-Space Iterator");
-  UpperBoundWithEmptyKeyOnWholeSpaceIterator(mock->get_iterator());
+  UpperBoundWithEmptyKeyOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, UpperBoundWithEmptyPrefixOnWholeSpaceIteratorLevelDB)
 {
   SCOPED_TRACE("LevelDB: Upper Bound, Empty Prefix, Whole-Space Iterator");
-  UpperBoundWithEmptyPrefixOnWholeSpaceIterator(db->get_iterator());
+  UpperBoundWithEmptyPrefixOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, UpperBoundWithEmptyPrefixOnWholeSpaceIteratorMockDB)
 {
   SCOPED_TRACE("MockDB: Upper Bound, Empty Prefix, Whole-Space Iterator");
-  UpperBoundWithEmptyPrefixOnWholeSpaceIterator(mock->get_iterator());
+  UpperBoundWithEmptyPrefixOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, UpperBoundOnWholeSpaceIteratorLevelDB)
 {
   SCOPED_TRACE("LevelDB: Upper Bound, Whole-Space Iterator");
-  UpperBoundOnWholeSpaceIterator(db->get_iterator());
+  UpperBoundOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(BoundsTest, UpperBoundOnWholeSpaceIteratorMockDB)
 {
   SCOPED_TRACE("MockDB: Upper Bound, Whole-Space Iterator");
-  UpperBoundOnWholeSpaceIterator(mock->get_iterator());
+  UpperBoundOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
@@ -1300,7 +1257,7 @@ public:
     store->submit_transaction_sync(tx);
   }
 
-  virtual void SetUp() {
+  void SetUp() override {
     IteratorTest::SetUp();
 
     prefix0 = "_PREFIX_0_";
@@ -1321,7 +1278,7 @@ public:
     ASSERT_TRUE(validate_db_match());
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     IteratorTest::TearDown();
   }
 
@@ -1501,49 +1458,49 @@ public:
 
 TEST_F(SeeksTest, SeekToFirstOnWholeSpaceIteratorLevelDB) {
   SCOPED_TRACE("LevelDB: Seek To First, Whole Space Iterator");
-  SeekToFirstOnWholeSpaceIterator(db->get_iterator());
+  SeekToFirstOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToFirstOnWholeSpaceIteratorMockDB) {
   SCOPED_TRACE("MockDB: Seek To First, Whole Space Iterator");
-  SeekToFirstOnWholeSpaceIterator(mock->get_iterator());
+  SeekToFirstOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToFirstWithPrefixOnWholeSpaceIteratorLevelDB) {
   SCOPED_TRACE("LevelDB: Seek To First, With Prefix, Whole Space Iterator");
-  SeekToFirstWithPrefixOnWholeSpaceIterator(db->get_iterator());
+  SeekToFirstWithPrefixOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToFirstWithPrefixOnWholeSpaceIteratorMockDB) {
   SCOPED_TRACE("MockDB: Seek To First, With Prefix, Whole Space Iterator");
-  SeekToFirstWithPrefixOnWholeSpaceIterator(mock->get_iterator());
+  SeekToFirstWithPrefixOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToLastOnWholeSpaceIteratorLevelDB) {
   SCOPED_TRACE("LevelDB: Seek To Last, Whole Space Iterator");
-  SeekToLastOnWholeSpaceIterator(db->get_iterator());
+  SeekToLastOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToLastOnWholeSpaceIteratorMockDB) {
   SCOPED_TRACE("MockDB: Seek To Last, Whole Space Iterator");
-  SeekToLastOnWholeSpaceIterator(mock->get_iterator());
+  SeekToLastOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToLastWithPrefixOnWholeSpaceIteratorLevelDB) {
   SCOPED_TRACE("LevelDB: Seek To Last, With Prefix, Whole Space Iterator");
-  SeekToLastWithPrefixOnWholeSpaceIterator(db->get_iterator());
+  SeekToLastWithPrefixOnWholeSpaceIterator(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(SeeksTest, SeekToLastWithPrefixOnWholeSpaceIteratorMockDB) {
   SCOPED_TRACE("MockDB: Seek To Last, With Prefix, Whole Space Iterator");
-  SeekToLastWithPrefixOnWholeSpaceIterator(mock->get_iterator());
+  SeekToLastWithPrefixOnWholeSpaceIterator(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
@@ -1562,7 +1519,7 @@ public:
     store->submit_transaction_sync(tx);
   }
 
-  virtual void SetUp() {
+  void SetUp() override {
     IteratorTest::SetUp();
 
     prefix1 = "_PREFIX_1_";
@@ -1578,7 +1535,7 @@ public:
     ASSERT_TRUE(validate_db_match());
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     IteratorTest::TearDown();
   }
 
@@ -1608,33 +1565,33 @@ public:
 TEST_F(KeySpaceIteration, ForwardIterationLevelDB)
 {
   SCOPED_TRACE("LevelDB: Forward Iteration, Whole Space Iterator");
-  ForwardIteration(db->get_iterator());
+  ForwardIteration(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(KeySpaceIteration, ForwardIterationMockDB) {
   SCOPED_TRACE("MockDB: Forward Iteration, Whole Space Iterator");
-  ForwardIteration(mock->get_iterator());
+  ForwardIteration(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(KeySpaceIteration, BackwardIterationLevelDB)
 {
   SCOPED_TRACE("LevelDB: Backward Iteration, Whole Space Iterator");
-  BackwardIteration(db->get_iterator());
+  BackwardIteration(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(KeySpaceIteration, BackwardIterationMockDB) {
   SCOPED_TRACE("MockDB: Backward Iteration, Whole Space Iterator");
-  BackwardIteration(mock->get_iterator());
+  BackwardIteration(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 class EmptyStore : public IteratorTest
 {
 public:
-  virtual void SetUp() {
+  void SetUp() override {
     IteratorTest::SetUp();
 
     clear(db.get());
@@ -1699,84 +1656,84 @@ public:
 TEST_F(EmptyStore, SeekToFirstLevelDB)
 {
   SCOPED_TRACE("LevelDB: Empty Store, Seek To First");
-  SeekToFirst(db->get_iterator());
+  SeekToFirst(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToFirstMockDB)
 {
   SCOPED_TRACE("MockDB: Empty Store, Seek To First");
-  SeekToFirst(mock->get_iterator());
+  SeekToFirst(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToFirstWithPrefixLevelDB)
 {
   SCOPED_TRACE("LevelDB: Empty Store, Seek To First With Prefix");
-  SeekToFirstWithPrefix(db->get_iterator());
+  SeekToFirstWithPrefix(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToFirstWithPrefixMockDB)
 {
   SCOPED_TRACE("MockDB: Empty Store, Seek To First With Prefix");
-  SeekToFirstWithPrefix(mock->get_iterator());
+  SeekToFirstWithPrefix(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToLastLevelDB)
 {
   SCOPED_TRACE("LevelDB: Empty Store, Seek To Last");
-  SeekToLast(db->get_iterator());
+  SeekToLast(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToLastMockDB)
 {
   SCOPED_TRACE("MockDB: Empty Store, Seek To Last");
-  SeekToLast(mock->get_iterator());
+  SeekToLast(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToLastWithPrefixLevelDB)
 {
   SCOPED_TRACE("LevelDB: Empty Store, Seek To Last With Prefix");
-  SeekToLastWithPrefix(db->get_iterator());
+  SeekToLastWithPrefix(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, SeekToLastWithPrefixMockDB)
 {
   SCOPED_TRACE("MockDB: Empty Store, Seek To Last With Prefix");
-  SeekToLastWithPrefix(mock->get_iterator());
+  SeekToLastWithPrefix(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, LowerBoundLevelDB)
 {
   SCOPED_TRACE("LevelDB: Empty Store, Lower Bound");
-  LowerBound(db->get_iterator());
+  LowerBound(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, LowerBoundMockDB)
 {
   SCOPED_TRACE("MockDB: Empty Store, Lower Bound");
-  LowerBound(mock->get_iterator());
+  LowerBound(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, UpperBoundLevelDB)
 {
   SCOPED_TRACE("LevelDB: Empty Store, Upper Bound");
-  UpperBound(db->get_iterator());
+  UpperBound(db->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
 TEST_F(EmptyStore, UpperBoundMockDB)
 {
   SCOPED_TRACE("MockDB: Empty Store, Upper Bound");
-  UpperBound(mock->get_iterator());
+  UpperBound(mock->get_wholespace_iterator());
   ASSERT_FALSE(HasFatalFailure());
 }
 
@@ -1786,7 +1743,7 @@ int main(int argc, char *argv[])
   vector<const char*> args;
   argv_to_vec(argc, (const char **) argv, args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
   ::testing::InitGoogleTest(&argc, argv);
 

@@ -4,9 +4,14 @@ set(CYTHON_MODULE_DIR ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cython_modules)
 
 # Keep the default version last
 if(WITH_PYTHON3)
-  set(py_vers 3)
+  list(APPEND py_vers 3)
 endif()
-list(APPEND py_vers 2)
+if(WITH_PYTHON2)
+  list(APPEND py_vers 2)
+endif()
+if(NOT py_vers)
+  message(FATAL_ERROR "No Python binding enabled. Please enable WITH_PYTHON2 and/or WITH_PYTHON3.")
+endif()
 
 foreach(python_version ${py_vers})
   if(${python_version} EQUAL 2)
@@ -28,6 +33,10 @@ foreach(python_version ${py_vers})
   if(WITH_CEPHFS)
     add_subdirectory(cephfs cephfs${PYTHON_VERSION})
     add_dependencies(cython${PYTHON_VERSION}_modules cython${PYTHON_VERSION}_cephfs)
+  endif()
+  if(WITH_RADOSGW)
+    add_subdirectory(rgw rgw${PYTHON_VERSION})
+    add_dependencies(cython${PYTHON_VERSION}_modules cython${PYTHON_VERSION}_rgw)
   endif()
 
   # if CMAKE_INSTALL_PREFIX is an empty string, must replace
@@ -52,14 +61,17 @@ foreach(python_version ${py_vers})
     DESTINATION ${PYTHON${PYTHON_VERSION}_INSTDIR})
 endforeach()
 
-install(FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/ceph_rest_api.py
-  DESTINATION ${PYTHON_INSTDIR})
-
 if(WITH_MGR)
-  # Needs to match src/common/config_opts.h, which has:
+  if(NOT WITH_PYTHON2 AND MGR_PYTHON_VERSION_MAJOR EQUAL 2)
+    message(FATAL_ERROR "mgr plugins require python2 binding")
+  elseif(NOT WITH_PYTHON3 AND MGR_PYTHON_VERSION_MAJOR EQUAL 3)
+    message(FATAL_ERROR "mgr plugins require python3 binding")
+  endif()
+  # Location needs to match default setting for mgr_module_path, currently:
   # OPTION(mgr_module_path, OPT_STR, CEPH_PKGLIBDIR "/mgr")
   install(DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}/mgr
-    DESTINATION ${CMAKE_INSTALL_PKGLIBDIR})
+    DESTINATION ${CMAKE_INSTALL_PKGLIBDIR}
+    REGEX ".*/\\.gitignore" EXCLUDE)
+  add_subdirectory(mgr)
 endif(WITH_MGR)

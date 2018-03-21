@@ -17,11 +17,11 @@
 #define CEPH_MON_ELECTOR_H
 
 #include <map>
-using namespace std;
 
 #include "include/types.h"
 #include "include/Context.h"
 #include "mon/MonOpRequest.h"
+#include "mon/mon_types.h"
 
 class Monitor;
 
@@ -36,6 +36,26 @@ class Elector {
    * @{
    */
  private:
+   /**
+   * @defgroup Elector_h_internal_types Internal Types
+   * @{
+   */
+  /**
+   * This struct will hold the features from a given peer.
+   * Features may both be the cluster's (in the form of a uint64_t), or
+   * mon-specific features. Instead of keeping maps to hold them both, or
+   * a pair, which would be weird, a struct to keep them seems appropriate.
+   */
+  struct elector_info_t {
+    uint64_t cluster_features;
+    mon_feature_t mon_features;
+    map<string,string> metadata;
+  };
+
+  /**
+   * @}
+   */
+
   /**
    * The Monitor instance associated with this class.
    */
@@ -45,7 +65,7 @@ class Elector {
    * Event callback responsible for dealing with an expired election once a
    * timer runs out and fires up.
    */
-  Context *expire_event;
+  Context *expire_event = nullptr;
 
   /**
    * Resets the expire_event timer, by cancelling any existing one and
@@ -110,8 +130,7 @@ class Elector {
    * If we are acked by everyone in the MonMap, we will declare
    * victory.  Also note each peer's feature set.
    */
-  map<int, uint64_t> acked_me;
-  set<int> classic_mons;
+  map<int, elector_info_t> acked_me;
   /**
    * @}
    */
@@ -316,7 +335,6 @@ class Elector {
    * @param m A Monitor instance
    */
   explicit Elector(Monitor *m) : mon(m),
-			expire_event(0),
 			epoch(0),
 			participating(true),
 			electing_me(false),
@@ -396,6 +414,7 @@ class Elector {
    * @post  @p participating is true
    */
   void start_participating();
+
   /**
    * @}
    */

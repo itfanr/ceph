@@ -16,6 +16,8 @@
 #include "MDCache.h"
 #include "MDSRank.h"
 
+#include <string_view>
+
 #include "messages/MClientSnap.h"
 
 
@@ -23,11 +25,12 @@
  * SnapRealm
  */
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mdcache->mds->get_nodeid(), inode, srnode.seq, this)
-static ostream& _prefix(std::ostream *_dout, int whoami, CInode *inode,
-			uint64_t seq, SnapRealm *realm) {
+static ostream& _prefix(std::ostream *_dout, int whoami, const CInode *inode,
+			uint64_t seq, const SnapRealm *realm) {
   return *_dout << " mds." << whoami
 		<< ".cache.snaprealm(" << inode->ino()
 		<< " seq " << seq << " " << realm << ") ";
@@ -99,8 +102,8 @@ struct C_SR_RetryOpenParents : public MDSInternalContextBase {
     sr(s), first(f), last(l), parent_last(pl),  parent(p), fin(c) {
     sr->inode->get(CInode::PIN_OPENINGSNAPPARENTS);
   }
-  MDSRank *get_mds() { return sr->mdcache->mds; }
-  void finish(int r) {
+  MDSRank *get_mds() override { return sr->mdcache->mds; }
+  void finish(int r) override {
     if (r < 0)
       sr->_remove_missing_parent(parent_last, parent, r);
     if (sr->_open_parents(fin, first, last))
@@ -132,7 +135,7 @@ bool SnapRealm::_open_parents(MDSInternalContextBase *finish, snapid_t first, sn
     dout(10) << " current parent [" << srnode.current_parent_since << ",head] is " << *parent
 	     << " on " << *parent->inode << dendl;
     if (last >= srnode.current_parent_since &&
-	!parent->_open_parents(finish, MAX(first, srnode.current_parent_since), last))
+	!parent->_open_parents(finish, std::max(first, srnode.current_parent_since), last))
       return false;
   }
 
@@ -171,6 +174,13 @@ bool SnapRealm::_open_parents(MDSInternalContextBase *finish, snapid_t first, sn
   return true;
 }
 
+bool SnapRealm::open_parents(MDSInternalContextBase *retryorfinish) {
+  if (!_open_parents(retryorfinish))
+    return false;
+  delete retryorfinish;
+  return true;
+}
+
 bool SnapRealm::have_past_parents_open(snapid_t first, snapid_t last)
 {
   dout(10) << "have_past_parents_open [" << first << "," << last << "]" << dendl;
@@ -189,8 +199,8 @@ bool SnapRealm::have_past_parents_open(snapid_t first, snapid_t last)
       return false;
     }
     SnapRealm *parent_realm = open_past_parents[p->second.ino].first;
-    if (!parent_realm->have_past_parents_open(MAX(first, p->second.first),
-					      MIN(last, p->first)))
+    if (!parent_realm->have_past_parents_open(std::max(first, p->second.first),
+					      std::min(last, p->first)))
       return false;
   }
 
@@ -215,7 +225,7 @@ void SnapRealm::close_parents()
  */
 void SnapRealm::build_snap_set(set<snapid_t> &s,
 			       snapid_t& max_seq, snapid_t& max_last_created, snapid_t& max_last_destroyed,
-			       snapid_t first, snapid_t last)
+			       snapid_t first, snapid_t last) const
 {
   dout(10) << "build_snap_set [" << first << "," << last << "] on " << *this << dendl;
 
@@ -227,29 +237,29 @@ void SnapRealm::build_snap_set(set<snapid_t> &s,
     max_last_destroyed = srnode.last_destroyed;
 
   // include my snaps within interval [first,last]
-  for (map<snapid_t, SnapInfo>::iterator p = srnode.snaps.lower_bound(first); // first element >= first
+  for (map<snapid_t, SnapInfo>::const_iterator p = srnode.snaps.lower_bound(first); // first element >= first
        p != srnode.snaps.end() && p->first <= last;
        ++p)
     s.insert(p->first);
 
   // include snaps for parents during intervals that intersect [first,last]
-  for (map<snapid_t, snaplink_t>::iterator p = srnode.past_parents.lower_bound(first);
+  for (map<snapid_t, snaplink_t>::const_iterator p = srnode.past_parents.lower_bound(first);
        p != srnode.past_parents.end() && p->first >= first && p->second.first <= last;
        ++p) {
-    CInode *oldparent = mdcache->get_inode(p->second.ino);
+    const CInode *oldparent = mdcache->get_inode(p->second.ino);
     assert(oldparent);  // call open_parents first!
     assert(oldparent->snaprealm);
     oldparent->snaprealm->build_snap_set(s, max_seq, max_last_created, max_last_destroyed,
-					 MAX(first, p->second.first),
-					 MIN(last, p->first));
+					 std::max(first, p->second.first),
+					 std::min(last, p->first));
   }
   if (srnode.current_parent_since <= last && parent)
     parent->build_snap_set(s, max_seq, max_last_created, max_last_destroyed,
-			   MAX(first, srnode.current_parent_since), last);
+			   std::max(first, srnode.current_parent_since), last);
 }
 
 
-void SnapRealm::check_cache()
+void SnapRealm::check_cache() const
 {
   assert(open);
   if (cached_seq >= srnode.seq)
@@ -275,7 +285,7 @@ void SnapRealm::check_cache()
 	   << ")" << dendl;
 }
 
-const set<snapid_t>& SnapRealm::get_snaps()
+const set<snapid_t>& SnapRealm::get_snaps() const
 {
   check_cache();
   dout(10) << "get_snaps " << cached_snaps
@@ -287,7 +297,7 @@ const set<snapid_t>& SnapRealm::get_snaps()
 /*
  * build vector in reverse sorted order
  */
-const SnapContext& SnapRealm::get_snap_context()
+const SnapContext& SnapRealm::get_snap_context() const
 {
   check_cache();
 
@@ -323,20 +333,21 @@ void SnapRealm::get_snap_info(map<snapid_t,SnapInfo*>& infomap, snapid_t first, 
     assert(oldparent);  // call open_parents first!
     assert(oldparent->snaprealm);
     oldparent->snaprealm->get_snap_info(infomap,
-					MAX(first, p->second.first),
-					MIN(last, p->first));
+					std::max(first, p->second.first),
+					std::min(last, p->first));
   }
   if (srnode.current_parent_since <= last && parent)
-    parent->get_snap_info(infomap, MAX(first, srnode.current_parent_since), last);
+    parent->get_snap_info(infomap, std::max(first, srnode.current_parent_since), last);
 }
 
-const string& SnapRealm::get_snapname(snapid_t snapid, inodeno_t atino)
+std::string_view SnapRealm::get_snapname(snapid_t snapid, inodeno_t atino)
 {
-  if (srnode.snaps.count(snapid)) {
+  auto srnode_snaps_entry = srnode.snaps.find(snapid);
+  if (srnode_snaps_entry != srnode.snaps.end()) {
     if (atino == inode->ino())
-      return srnode.snaps[snapid].name;
+      return srnode_snaps_entry->second.name;
     else
-      return srnode.snaps[snapid].get_long_name();
+      return srnode_snaps_entry->second.get_long_name();
   }
 
   map<snapid_t,snaplink_t>::iterator p = srnode.past_parents.lower_bound(snapid);
@@ -352,7 +363,7 @@ const string& SnapRealm::get_snapname(snapid_t snapid, inodeno_t atino)
   return parent->get_snapname(snapid, atino);
 }
 
-snapid_t SnapRealm::resolve_snapname(const string& n, inodeno_t atino, snapid_t first, snapid_t last)
+snapid_t SnapRealm::resolve_snapname(std::string_view n, inodeno_t atino, snapid_t first, snapid_t last)
 {
   // first try me
   dout(10) << "resolve_snapname '" << n << "' in [" << first << "," << last << "]" << dendl;
@@ -369,7 +380,7 @@ snapid_t SnapRealm::resolve_snapname(const string& n, inodeno_t atino, snapid_t 
     int next_ = n.find('_', 1);
     if (next_ < 0) return 0;
     pname = n.substr(1, next_ - 1);
-    pino = atoll(n.c_str() + next_ + 1);
+    pino = atoll(n.data() + next_ + 1);
     dout(10) << " " << n << " parses to name '" << pname << "' dirino " << pino << dendl;
   }
 
@@ -393,20 +404,21 @@ snapid_t SnapRealm::resolve_snapname(const string& n, inodeno_t atino, snapid_t 
     assert(oldparent);  // call open_parents first!
     assert(oldparent->snaprealm);
     snapid_t r = oldparent->snaprealm->resolve_snapname(n, atino,
-							MAX(first, p->second.first),
-							MIN(last, p->first));
+							std::max(first, p->second.first),
+							std::min(last, p->first));
     if (r)
       return r;
   }
   if (parent && srnode.current_parent_since <= last)
-    return parent->resolve_snapname(n, atino, MAX(first, srnode.current_parent_since), last);
+    return parent->resolve_snapname(n, atino, std::max(first, srnode.current_parent_since), last);
   return 0;
 }
 
 
 void SnapRealm::adjust_parent()
 {
-  SnapRealm *newparent = inode->get_parent_dn()->get_dir()->get_inode()->find_snaprealm();
+  CDentry *pdn = inode->get_parent_dn();
+  SnapRealm *newparent = pdn ? pdn->get_dir()->get_inode()->find_snaprealm() : NULL;
   if (newparent != parent) {
     dout(10) << "adjust_parent " << parent << " -> " << newparent << dendl;
     if (parent)
@@ -446,7 +458,7 @@ void SnapRealm::split_at(SnapRealm *child)
        p != open_children.end(); ) {
     SnapRealm *realm = *p;
     if (realm != child &&
-	child->inode->is_projected_ancestor_of(realm->inode)) {
+	child->inode->is_ancestor_of(realm->inode)) {
       dout(20) << " child gets child realm " << *realm << " on " << *realm->inode << dendl;
       realm->parent = child;
       child->open_children.insert(realm);
@@ -458,29 +470,12 @@ void SnapRealm::split_at(SnapRealm *child)
   }
 
   // split inodes_with_caps
-  elist<CInode*>::iterator p = inodes_with_caps.begin(member_offset(CInode, item_caps));
-  while (!p.end()) {
+  for (elist<CInode*>::iterator p = inodes_with_caps.begin(member_offset(CInode, item_caps));
+       !p.end(); ) {
     CInode *in = *p;
     ++p;
-
     // does inode fall within the child realm?
-    bool under_child = false;
-
-    if (in == child->inode) {
-      under_child = true;
-    } else {
-      CInode *t = in;
-      while (t->get_parent_dn()) {
-	t = t->get_parent_dn()->get_dir()->get_inode();
-	if (t == child->inode) {
-	  under_child = true;
-	  break;
-	}
-	if (t == in)
-	  break;
-      }
-    }
-    if (under_child) {
+    if (child->inode->is_ancestor_of(in)) {
       dout(20) << " child gets " << *in << dendl;
       in->move_to_realm(child);
     } else {
@@ -496,7 +491,7 @@ const bufferlist& SnapRealm::get_snap_trace()
   return cached_snap_trace;
 }
 
-void SnapRealm::build_snap_trace(bufferlist& snapbl)
+void SnapRealm::build_snap_trace(bufferlist& snapbl) const
 {
   SnapRealmInfo info(inode->ino(), srnode.created, srnode.seq, srnode.current_parent_since);
 
@@ -517,13 +512,13 @@ void SnapRealm::build_snap_trace(bufferlist& snapbl)
     info.h.parent = 0;
 
   info.my_snaps.reserve(srnode.snaps.size());
-  for (map<snapid_t,SnapInfo>::reverse_iterator p = srnode.snaps.rbegin();
+  for (map<snapid_t,SnapInfo>::const_reverse_iterator p = srnode.snaps.rbegin();
        p != srnode.snaps.rend();
        ++p)
     info.my_snaps.push_back(p->first);
   dout(10) << "build_snap_trace my_snaps " << info.my_snaps << dendl;
 
-  ::encode(info, snapbl);
+  encode(info, snapbl);
 
   if (parent)
     parent->build_snap_trace(snapbl);

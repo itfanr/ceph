@@ -30,7 +30,8 @@ void get_arguments(po::options_description *positional,
   at::add_image_spec_options(positional, options, at::ARGUMENT_MODIFIER_DEST);
 }
 
-int execute(const po::variables_map &vm) {
+int execute(const po::variables_map &vm,
+            const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string image_name;
@@ -42,9 +43,9 @@ int execute(const po::variables_map &vm) {
     return r;
   }
 
-  std::string dst_pool_name;
   std::string dst_image_name;
   std::string dst_snap_name;
+  std::string dst_pool_name = pool_name;
   r = utils::get_pool_image_snapshot_names(
     vm, at::ARGUMENT_MODIFIER_DEST, &arg_index, &dst_pool_name, &dst_image_name,
     &dst_snap_name, utils::SNAPSHOT_PRESENCE_NONE, utils::SPEC_VALIDATION_FULL);
@@ -79,6 +80,6 @@ Shell::Action action(
   {"rename"}, {"mv"}, "Rename image within pool.", "", &get_arguments,
   &execute);
 
-} // namespace list
+} // namespace rename
 } // namespace action
 } // namespace rbd

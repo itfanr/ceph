@@ -73,7 +73,7 @@ public:
   virtual ~LogEvent() { }
 
   string get_type_str() const;
-  static EventType str_to_type(std::string const &str);
+  static EventType str_to_type(std::string_view str);
   EventType get_type() const { return _type; }
   void set_type(EventType t) { _type = t; }
 
@@ -90,10 +90,11 @@ public:
   virtual void dump(Formatter *f) const = 0;
 
   void encode_with_header(bufferlist& bl, uint64_t features) {
-    ::encode(EVENT_NEW_ENCODING, bl);
+    using ceph::encode;
+    encode(EVENT_NEW_ENCODING, bl);
     ENCODE_START(1, 1, bl)
-    ::encode(_type, bl);
-    encode(bl, features);
+    encode(_type, bl);
+    this->encode(bl, features);
     ENCODE_FINISH(bl);
   }
 
@@ -109,13 +110,16 @@ public:
   /*** recovery ***/
   /* replay() - replay given event.  this is idempotent.
    */
-  virtual void replay(MDSRank *m) { assert(0); }
+  virtual void replay(MDSRank *m) { ceph_abort(); }
 
   /**
    * If the subclass embeds a MetaBlob, return it here so that
    * tools can examine metablobs while traversing lists of LogEvent.
    */
   virtual EMetaBlob *get_metablob() { return NULL; }
+
+private:
+  static const std::map<std::string, LogEvent::EventType> types;
 };
 
 inline ostream& operator<<(ostream& out, const LogEvent &le) {

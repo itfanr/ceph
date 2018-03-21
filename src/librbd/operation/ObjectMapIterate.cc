@@ -4,6 +4,7 @@
 #include "librbd/operation/ObjectMapIterate.h"
 #include "common/dout.h"
 #include "common/errno.h"
+#include "osdc/Striper.h"
 #include "librbd/AsyncObjectThrottle.h"
 #include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
@@ -38,21 +39,23 @@ public:
     m_handle_mismatch(handle_mismatch),
     m_invalidate(invalidate)
   {
-    m_io_ctx.dup(image_ctx->md_ctx);
+    m_io_ctx.dup(image_ctx->data_ctx);
     m_io_ctx.snap_set_read(CEPH_SNAPDIR);
   }
 
-  virtual void complete(int r) {
+  void complete(int r) override {
     I &image_ctx = this->m_image_ctx;
     if (should_complete(r)) {
       ldout(image_ctx.cct, 20) << m_oid << " C_VerifyObjectCallback completed "
 			       << dendl;
+      m_io_ctx.close();
+
       this->finish(r);
       delete this;
     }
   }
 
-  virtual int send() {
+  int send() override {
     send_list_snaps();
     return 0;
   }
@@ -66,7 +69,7 @@ private:
   std::atomic_flag *m_invalidate;
 
   librados::snap_set_t m_snap_set;
-  int m_snap_list_ret;
+  int m_snap_list_ret = 0;
 
   bool should_complete(int r) {
     I &image_ctx = this->m_image_ctx;
@@ -96,7 +99,7 @@ private:
     librados::ObjectReadOperation op;
     op.list_snaps(&m_snap_set, &m_snap_list_ret);
 
-    librados::AioCompletion *comp = util::create_rados_safe_callback(this);
+    librados::AioCompletion *comp = util::create_rados_callback(this);
     int r = m_io_ctx.aio_operate(m_oid, comp, &op, NULL);
     assert(r == 0);
     comp->release();
@@ -198,12 +201,17 @@ template <typename I>
 bool ObjectMapIterateRequest<I>::should_complete(int r) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " should_complete: " << " r=" << r << dendl;
+  if (r < 0) {
+    lderr(cct) << "object map operation encountered an error: "
+	       << cpp_strerror(r) << dendl;
+  }
 
   RWLock::RLocker owner_lock(m_image_ctx.owner_lock);
   switch (m_state) {
   case STATE_VERIFY_OBJECTS:
     if (m_invalidate.test_and_set()) {
       send_invalidate_object_map();
+      return false;
     } else if (r == 0) {
       return true;
     }
@@ -216,14 +224,11 @@ bool ObjectMapIterateRequest<I>::should_complete(int r) {
     break;
 
   default:
-    assert(false);
+    ceph_abort();
     break;
   }
 
   if (r < 0) {
-    lderr(cct) << "object map operation encountered an error: "
-	       << cpp_strerror(r)
-               << dendl;
     return true;
   }
 
@@ -254,7 +259,7 @@ void ObjectMapIterateRequest<I>::send_verify_objects() {
   AsyncObjectThrottle<I> *throttle = new AsyncObjectThrottle<I>(
     this, m_image_ctx, context_factory, this->create_callback_context(),
     &m_prog_ctx, 0, num_objects);
-  throttle->start_ops(cct->_conf->rbd_concurrent_management_ops);
+  throttle->start_ops(m_image_ctx.concurrent_management_ops);
 }
 
 template <typename I>

@@ -54,7 +54,6 @@ int main(int argc, const char **argv)
 {
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
-  env_to_vec(args);
 
   std::string add_key;
   std::string caps_fn;
@@ -63,8 +62,9 @@ int main(int argc, const char **argv)
   map<string,bufferlist> caps;
   std::string fn;
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY,
-	      CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
 
   bool gen_key = false;
   bool gen_print_key = false;
@@ -103,7 +103,7 @@ int main(int argc, const char **argv)
       }
       std::string my_val = *i;
       ++i;
-      ::encode(my_val, caps[my_key]);
+      encode(my_val, caps[my_key]);
     } else if (ceph_argparse_flag(args, i, "-p", "--print-key", (char*)NULL)) {
       print_key = true;
     } else if (ceph_argparse_flag(args, i, "-C", "--create-keyring", (char*)NULL)) {
@@ -180,7 +180,7 @@ int main(int argc, const char **argv)
     if (r >= 0) {
       try {
 	bufferlist::iterator iter = bl.begin();
-	::decode(keyring, iter);
+	decode(keyring, iter);
       } catch (const buffer::error &err) {
 	cerr << "error reading file " << fn << std::endl;
 	exit(1);
@@ -211,7 +211,7 @@ int main(int argc, const char **argv)
     if (r >= 0) {
       try {
 	bufferlist::iterator iter = obl.begin();
-	::decode(other, iter);
+	decode(other, iter);
       } catch (const buffer::error &err) {
 	cerr << "error reading file " << import_keyring << std::endl;
 	exit(1);
@@ -253,12 +253,12 @@ int main(int argc, const char **argv)
     }
     complain_about_parse_errors(g_ceph_context, &parse_errors);
     map<string, bufferlist> caps;
-    const char *key_names[] = { "mon", "osd", "mds", NULL };
+    const char *key_names[] = { "mon", "osd", "mds", "mgr", NULL };
     for (int i=0; key_names[i]; i++) {
       std::string val;
       if (cf.read("global", key_names[i], val) == 0) {
 	bufferlist bl;
-	::encode(val, bl);
+	encode(val, bl);
 	string s(key_names[i]);
 	caps[s] = bl;
       }

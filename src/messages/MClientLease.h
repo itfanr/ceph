@@ -16,11 +16,13 @@
 #ifndef CEPH_MCLIENTLEASE_H
 #define CEPH_MCLIENTLEASE_H
 
+#include <string_view>
+
 #include "msg/Message.h"
 
 struct MClientLease : public Message {
   struct ceph_mds_lease h;
-  string dname;
+  std::string dname;
   
   int get_action() const { return h.action; }
   ceph_seq_t get_seq() const { return h.seq; }
@@ -40,7 +42,7 @@ struct MClientLease : public Message {
     h.last = sl;
     h.duration_ms = 0;
   }
-  MClientLease(int ac, ceph_seq_t seq, int m, uint64_t i, uint64_t sf, uint64_t sl, const string& d) :
+  MClientLease(int ac, ceph_seq_t seq, int m, uint64_t i, uint64_t sf, uint64_t sl, std::string_view d) :
     Message(CEPH_MSG_CLIENT_LEASE),
     dname(d) {
     h.action = ac;
@@ -52,11 +54,11 @@ struct MClientLease : public Message {
     h.duration_ms = 0;
   }
 private:
-  ~MClientLease() {}
+  ~MClientLease() override {}
 
 public:
-  const char *get_type_name() const { return "client_lease"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "client_lease"; }
+  void print(ostream& out) const override {
     out << "client_lease(a=" << ceph_lease_op_name(get_action())
 	<< " seq " << get_seq()
 	<< " mask " << get_mask();
@@ -68,14 +70,15 @@ public:
     out << ")";
   }
   
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
-    ::decode(h, p);
-    ::decode(dname, p);
+    decode(h, p);
+    decode(dname, p);
   }
-  virtual void encode_payload(uint64_t features) {
-    ::encode(h, payload);
-    ::encode(dname, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(h, payload);
+    encode(dname, payload);
   }
 
 };

@@ -7,7 +7,7 @@
 #include "Entry.h"
 
 namespace ceph {
-namespace log {
+namespace logging {
 
 struct EntryQueue {
   int m_len;
@@ -59,7 +59,7 @@ struct EntryQueue {
     Entry *t;
     while (m_head) {
       t = m_head->m_next;
-      delete m_head;
+      m_head->destroy();
       m_head = t;
     }      
   }

@@ -16,6 +16,7 @@
 #define CEPH_MMDSLoadTargets_H
 
 #include "msg/Message.h"
+#include "mds/mdstypes.h"
 #include "messages/PaxosServiceMessage.h"
 #include "include/types.h"
 
@@ -33,25 +34,27 @@ class MMDSLoadTargets : public PaxosServiceMessage {
     PaxosServiceMessage(MSG_MDS_OFFLOAD_TARGETS, 0),
     global_id(g), targets(mds_targets) {}
 private:
-  ~MMDSLoadTargets() {}
+  ~MMDSLoadTargets() override {}
 
 public:
-  const char* get_type_name() const { return "mds_load_targets"; }
-  void print(ostream& o) const {
+  const char* get_type_name() const override { return "mds_load_targets"; }
+  void print(ostream& o) const override {
     o << "mds_load_targets(" << global_id << " " << targets << ")";
   }
 
-  void decode_payload() {
+  void decode_payload() override {
+    using ceph::decode;
     bufferlist::iterator p = payload.begin();
     paxos_decode(p);
-    ::decode(global_id, p);
-    ::decode(targets, p);
+    decode(global_id, p);
+    decode(targets, p);
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
     paxos_encode();
-    ::encode(global_id, payload);
-    ::encode(targets, payload);
+    encode(global_id, payload);
+    encode(targets, payload);
   }
 };
 

@@ -34,7 +34,8 @@ void get_rebuild_arguments(po::options_description *positional,
   at::add_no_progress_option(options);
 }
 
-int execute_rebuild(const po::variables_map &vm) {
+int execute_rebuild(const po::variables_map &vm,
+                    const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string image_name;
@@ -50,7 +51,7 @@ int execute_rebuild(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, snap_name, false,
+  r = utils::init_and_open_image(pool_name, image_name, "", snap_name, false,
                                  &rados, &io_ctx, &image);
   if (r < 0) {
     return r;
@@ -84,7 +85,8 @@ void get_check_arguments(po::options_description *positional,
   at::add_no_progress_option(options);
 }
 
-int execute_check(const po::variables_map &vm) {
+int execute_check(const po::variables_map &vm,
+                  const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string image_name;
@@ -100,7 +102,7 @@ int execute_check(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, snap_name, false,
+  r = utils::init_and_open_image(pool_name, image_name, "", snap_name, false,
 				 &rados, &io_ctx, &image);
   if (r < 0) {
     return r;

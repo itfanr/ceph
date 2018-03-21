@@ -22,7 +22,6 @@
 #include "global/global_context.h"
 #include <iostream>
 #include <boost/program_options.hpp>
-#include <boost/regex.hpp>
 
 namespace rbd {
 namespace action {
@@ -31,6 +30,25 @@ namespace mirror_image {
 namespace at = argument_types;
 namespace po = boost::program_options;
 
+namespace {
+
+int validate_mirroring_enabled(librbd::Image& image) {
+  librbd::mirror_image_info_t mirror_image;
+  int r = image.mirror_image_get_info(&mirror_image, sizeof(mirror_image));
+  if (r < 0) {
+    std::cerr << "rbd: failed to retrieve mirror mode: "
+              << cpp_strerror(r) << std::endl;
+    return r;
+  }
+
+  if (mirror_image.state != RBD_MIRROR_IMAGE_ENABLED) {
+    std::cerr << "rbd: mirroring not enabled on the image" << std::endl;
+    return -EINVAL;
+  }
+  return 0;
+}
+
+} // anonymous namespace
 
 void get_arguments(po::options_description *positional,
                            po::options_description *options) {
@@ -60,7 +78,7 @@ int execute_enable_disable(const po::variables_map &vm, bool enable,
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, "", false,
+  r = utils::init_and_open_image(pool_name, image_name, "", "", false,
                                  &rados, &io_ctx, &image);
   if (r < 0) {
     return r;
@@ -77,11 +95,13 @@ int execute_enable_disable(const po::variables_map &vm, bool enable,
   return 0;
 }
 
-int execute_disable(const po::variables_map &vm) {
+int execute_disable(const po::variables_map &vm,
+                    const std::vector<std::string> &ceph_global_init_args) {
   return execute_enable_disable(vm, false, vm["force"].as<bool>());
 }
 
-int execute_enable(const po::variables_map &vm) {
+int execute_enable(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   return execute_enable_disable(vm, true, false);
 }
 
@@ -92,7 +112,8 @@ void get_arguments_promote(po::options_description *positional,
   at::add_image_spec_options(positional, options, at::ARGUMENT_MODIFIER_NONE);
 }
 
-int execute_promote(const po::variables_map &vm) {
+int execute_promote(const po::variables_map &vm,
+                    const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string image_name;
@@ -109,8 +130,13 @@ int execute_promote(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, "", false,
+  r = utils::init_and_open_image(pool_name, image_name, "", "", false,
                                  &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  r = validate_mirroring_enabled(image);
   if (r < 0) {
     return r;
   }
@@ -125,7 +151,8 @@ int execute_promote(const po::variables_map &vm) {
   return 0;
 }
 
-int execute_demote(const po::variables_map &vm) {
+int execute_demote(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string image_name;
@@ -140,8 +167,13 @@ int execute_demote(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, "", false,
+  r = utils::init_and_open_image(pool_name, image_name, "", "", false,
                                  &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  r = validate_mirroring_enabled(image);
   if (r < 0) {
     return r;
   }
@@ -156,7 +188,8 @@ int execute_demote(const po::variables_map &vm) {
   return 0;
 }
 
-int execute_resync(const po::variables_map &vm) {
+int execute_resync(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string image_name;
@@ -171,8 +204,13 @@ int execute_resync(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, "", false,
+  r = utils::init_and_open_image(pool_name, image_name, "", "", false,
                                  &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  r = validate_mirroring_enabled(image);
   if (r < 0) {
     return r;
   }
@@ -193,7 +231,8 @@ void get_status_arguments(po::options_description *positional,
   at::add_format_options(options);
 }
 
-int execute_status(const po::variables_map &vm) {
+int execute_status(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   at::Format::Formatter formatter;
   int r = utils::get_formatter(vm, &formatter);
   if (r < 0) {
@@ -214,8 +253,13 @@ int execute_status(const po::variables_map &vm) {
   librados::Rados rados;
   librados::IoCtx io_ctx;
   librbd::Image image;
-  r = utils::init_and_open_image(pool_name, image_name, "", false,
+  r = utils::init_and_open_image(pool_name, image_name, "", "", false,
                                  &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  r = validate_mirroring_enabled(image);
   if (r < 0) {
     return r;
   }
@@ -229,7 +273,8 @@ int execute_status(const po::variables_map &vm) {
   }
 
   std::string state = utils::mirror_image_status_state(status);
-  std::string last_update = utils::timestr(status.last_update);
+  std::string last_update = (
+    status.last_update == 0 ? "" : utils::timestr(status.last_update));
 
   if (formatter != nullptr) {
     formatter->open_object_section("image");
@@ -273,7 +318,7 @@ Shell::Action action_resync(
   &get_arguments, &execute_resync);
 Shell::Action action_status(
   {"mirror", "image", "status"}, {},
-  "Show RDB mirroring status for an image.", "",
+  "Show RBD mirroring status for an image.", "",
   &get_status_arguments, &execute_status);
 
 } // namespace mirror_image

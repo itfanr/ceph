@@ -29,24 +29,25 @@ struct MMDSOpenInoReply : public Message {
     header.tid = t;
   }
 
-  const char *get_type_name() const { return "openinoreply"; }
-  void print(ostream &out) const {
+  const char *get_type_name() const override { return "openinoreply"; }
+  void print(ostream &out) const override {
     out << "openinoreply(" << header.tid << " "
 	<< ino << " " << hint << " " << ancestors << ")";
   }
 
-  void encode_payload(uint64_t features) {
-    ::encode(ino, payload);
-    ::encode(ancestors, payload);
-    ::encode(hint, payload);
-    ::encode(error, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(ino, payload);
+    encode(ancestors, payload);
+    encode(hint, payload);
+    encode(error, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
-    ::decode(ino, p);
-    ::decode(ancestors, p);
-    ::decode(hint, p);
-    ::decode(error, p);
+    decode(ino, p);
+    decode(ancestors, p);
+    decode(hint, p);
+    decode(error, p);
   }
 };
 

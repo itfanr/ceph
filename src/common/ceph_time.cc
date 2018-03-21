@@ -13,16 +13,21 @@
  */
 
 // For ceph_timespec
-#include "include/types.h"
-
-#include "ceph_context.h"
 #include "ceph_time.h"
+#include "log/LogClock.h"
 #include "config.h"
 
-#if defined(DARWIN)
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+
+#ifndef NSEC_PER_SEC
+#define NSEC_PER_SEC 1000000000ULL
+#endif
+
 int clock_gettime(int clk_id, struct timespec *tp)
 {
-  if (clk_id == CALENDAR_CLOCK) {
+  if (clk_id == CLOCK_REALTIME) {
     // gettimeofday is much faster than clock_get_time
     struct timeval now;
     int ret = gettimeofday(&now, NULL);
@@ -31,15 +36,14 @@ int clock_gettime(int clk_id, struct timespec *tp)
     tp->tv_sec = now.tv_sec;
     tp->tv_nsec = now.tv_usec * 1000L;
   } else {
-    clock_serv_t cclock;
-    mach_timespec_t mts;
-
-    host_get_clock_service(mach_host_self(), clk_id, &cclock);
-    clock_get_time(cclock, &mts);
-    mach_port_deallocate(mach_task_self(), cclock);
-
-    tp->tv_sec = mts.tv_sec;
-    tp->tv_nsec = mts.tv_nsec;
+    uint64_t t = mach_absolute_time();
+    static mach_timebase_info_data_t timebase_info;
+    if (timebase_info.denom == 0) {
+      (void)mach_timebase_info(&timebase_info);
+    }
+    auto nanos = t * timebase_info.numer / timebase_info.denom;
+    tp->tv_sec = nanos / NSEC_PER_SEC;
+    tp->tv_nsec = nanos - (tp->tv_sec * NSEC_PER_SEC);
   }
   return 0;
 }
@@ -47,13 +51,6 @@ int clock_gettime(int clk_id, struct timespec *tp)
 
 namespace ceph {
   namespace time_detail {
-    real_clock::time_point real_clock::now(const CephContext* cct) noexcept {
-      auto t = now();
-      if (cct)
-	t += make_timespan(cct->_conf->clock_offset);
-      return t;
-    }
-
     void real_clock::to_ceph_timespec(const time_point& t,
 				      struct ceph_timespec& ts) {
       ts.tv_sec = to_time_t(t);
@@ -67,14 +64,6 @@ namespace ceph {
     real_clock::time_point real_clock::from_ceph_timespec(
       const struct ceph_timespec& ts) {
       return time_point(seconds(ts.tv_sec) + nanoseconds(ts.tv_nsec));
-    }
-
-    coarse_real_clock::time_point coarse_real_clock::now(
-      const CephContext* cct) noexcept {
-      auto t = now();
-      if (cct)
-	t += make_timespan(cct->_conf->clock_offset);
-      return t;
     }
 
     void coarse_real_clock::to_ceph_timespec(const time_point& t,
@@ -92,7 +81,8 @@ namespace ceph {
       const struct ceph_timespec& ts) {
       return time_point(seconds(ts.tv_sec) + nanoseconds(ts.tv_nsec));
     }
-  };
+
+  }
 
   using std::chrono::duration_cast;
   using std::chrono::seconds;

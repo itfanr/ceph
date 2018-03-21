@@ -104,7 +104,7 @@ bool SnapshotRemoveRequest::should_complete(int r) {
     finished = true;
     break;
   default:
-    assert(false);
+    ceph_abort();
     break;
   }
   return finished;
@@ -112,7 +112,7 @@ bool SnapshotRemoveRequest::should_complete(int r) {
 
 void SnapshotRemoveRequest::send_load_map() {
   CephContext *cct = m_image_ctx.cct;
-  std::string snap_oid(ObjectMap::object_map_name(m_image_ctx.id, m_snap_id));
+  std::string snap_oid(ObjectMap<>::object_map_name(m_image_ctx.id, m_snap_id));
   ldout(cct, 5) << this << " " << __func__ << ": snap_oid=" << snap_oid
                 << dendl;
   m_state = STATE_LOAD_MAP;
@@ -129,7 +129,7 @@ void SnapshotRemoveRequest::send_load_map() {
 
 void SnapshotRemoveRequest::send_remove_snapshot() {
   CephContext *cct = m_image_ctx.cct;
-  std::string oid(ObjectMap::object_map_name(m_image_ctx.id, m_next_snap_id));
+  std::string oid(ObjectMap<>::object_map_name(m_image_ctx.id, m_next_snap_id));
   ldout(cct, 5) << this << " " << __func__ << ": oid=" << oid << dendl;
   m_state = STATE_REMOVE_SNAPSHOT;
 
@@ -161,7 +161,7 @@ void SnapshotRemoveRequest::send_invalidate_next_map() {
 
 void SnapshotRemoveRequest::send_remove_map() {
   CephContext *cct = m_image_ctx.cct;
-  std::string oid(ObjectMap::object_map_name(m_image_ctx.id, m_snap_id));
+  std::string oid(ObjectMap<>::object_map_name(m_image_ctx.id, m_snap_id));
   ldout(cct, 5) << this << " " << __func__ << ": oid=" << oid << dendl;
   m_state = STATE_REMOVE_MAP;
 
@@ -194,13 +194,21 @@ void SnapshotRemoveRequest::update_object_map() {
   if (m_next_snap_id == m_image_ctx.snap_id && m_next_snap_id == CEPH_NOSNAP) {
     CephContext *cct = m_image_ctx.cct;
     ldout(cct, 5) << this << " " << __func__ << dendl;
-
-    for (uint64_t i = 0; i < m_object_map.size(); ++i) {
-      if (m_object_map[i] == OBJECT_EXISTS_CLEAN &&
+    
+    auto it = m_object_map.begin();
+    auto end_it = m_object_map.end();
+    auto snap_it = m_snap_object_map.begin();
+    uint64_t i = 0;
+    for (; it != end_it; ++it) {
+      if (*it == OBJECT_EXISTS_CLEAN &&
           (i >= m_snap_object_map.size() ||
-           m_snap_object_map[i] == OBJECT_EXISTS)) {
-        m_object_map[i] = OBJECT_EXISTS;
+           *snap_it == OBJECT_EXISTS)) {
+        *it = OBJECT_EXISTS;
       }
+      if (i < m_snap_object_map.size()) {
+        ++snap_it;
+      }
+      ++i;
     }
   }
 }

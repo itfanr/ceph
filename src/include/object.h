@@ -20,14 +20,16 @@
 
 #include <iosfwd>
 #include <iomanip>
-using namespace std;
 
+#include "include/rados.h"
 #include "include/unordered_map.h"
 
 #include "hash.h"
 #include "encoding.h"
 #include "ceph_hash.h"
 #include "cmp.h"
+
+using namespace std;
 
 struct object_t {
   string name;
@@ -46,10 +48,12 @@ struct object_t {
   }
   
   void encode(bufferlist &bl) const {
-    ::encode(name, bl);
+    using ceph::encode;
+    encode(name, bl);
   }
   void decode(bufferlist::iterator &bl) {
-    ::decode(name, bl);
+    using ceph::decode;
+    decode(name, bl);
   }
 };
 WRITE_CLASS_ENCODER(object_t)
@@ -122,7 +126,24 @@ struct snapid_t {
 inline void encode(snapid_t i, bufferlist &bl) { encode(i.val, bl); }
 inline void decode(snapid_t &i, bufferlist::iterator &p) { decode(i.val, p); }
 
-inline ostream& operator<<(ostream& out, snapid_t s) {
+template<>
+struct denc_traits<snapid_t> {
+  static constexpr bool supported = true;
+  static constexpr bool featured = false;
+  static constexpr bool bounded = true;
+  static constexpr bool need_contiguous = true;
+  static void bound_encode(const snapid_t& o, size_t& p) {
+    denc(o.val, p);
+  }
+  static void encode(const snapid_t &o, buffer::list::contiguous_appender& p) {
+    denc(o.val, p);
+  }
+  static void decode(snapid_t& o, buffer::ptr::iterator &p) {
+    denc(o.val, p);
+  }
+};
+
+inline ostream& operator<<(ostream& out, const snapid_t& s) {
   if (s == CEPH_NOSNAP)
     return out << "head";
   else if (s == CEPH_SNAPDIR)
@@ -147,12 +168,14 @@ struct sobject_t {
   }
 
   void encode(bufferlist& bl) const {
-    ::encode(oid, bl);
-    ::encode(snap, bl);
+    using ceph::encode;
+    encode(oid, bl);
+    encode(snap, bl);
   }
   void decode(bufferlist::iterator& bl) {
-    ::decode(oid, bl);
-    ::decode(snap, bl);
+    using ceph::decode;
+    decode(oid, bl);
+    decode(snap, bl);
   }
 };
 WRITE_CLASS_ENCODER(sobject_t)

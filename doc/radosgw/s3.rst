@@ -38,9 +38,9 @@ The following table describes the support status for current Amazon S3 functiona
 +---------------------------------+-----------------+----------------------------------------+
 | **Create Bucket**               | Supported       | Different set of canned ACLs           |
 +---------------------------------+-----------------+----------------------------------------+
-| **Bucket Lifecycle**            | Not Supported   |                                        |
+| **Bucket Lifecycle**            | Supported       | Removing expired files is supported    |
 +---------------------------------+-----------------+----------------------------------------+
-| **Policy (Buckets, Objects)**   | Not Supported   | ACLs are supported                     |
+| **Policy (Buckets, Objects)**   | Supported       | ACLs & bucket policies are supported   |
 +---------------------------------+-----------------+----------------------------------------+
 | **Bucket Website**              | Supported       |                                        |
 +---------------------------------+-----------------+----------------------------------------+
@@ -70,8 +70,11 @@ The following table describes the support status for current Amazon S3 functiona
 +---------------------------------+-----------------+----------------------------------------+
 | **Copy Object**                 | Supported       |                                        |
 +---------------------------------+-----------------+----------------------------------------+
-| **Multipart Uploads**           | Supported       | (missing Copy Part)                    |
+| **Multipart Uploads**           | Supported       |                                        |
 +---------------------------------+-----------------+----------------------------------------+
+| **Object Tagging**              | Supported       | Not supported in bucket policy/LC rules|
++---------------------------------+-----------------+----------------------------------------+
+
 
 Unsupported Header Fields
 -------------------------

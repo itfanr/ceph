@@ -19,6 +19,8 @@
 
 int64_t unit_to_bytesize(string val, ostream *pss);
 
+std::string bytes2str(uint64_t count);
+
 struct ceph_data_stats
 {
   uint64_t byte_total;
@@ -43,19 +45,19 @@ struct ceph_data_stats
 
   void encode(bufferlist &bl) const {
     ENCODE_START(1, 1, bl);
-    ::encode(byte_total, bl);
-    ::encode(byte_used, bl);
-    ::encode(byte_avail, bl);
-    ::encode(avail_percent, bl);
+    encode(byte_total, bl);
+    encode(byte_used, bl);
+    encode(byte_avail, bl);
+    encode(avail_percent, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::iterator &p) {
     DECODE_START(1, p);
-    ::decode(byte_total, p);
-    ::decode(byte_used, p);
-    ::decode(byte_avail, p);
-    ::decode(avail_percent, p);
+    decode(byte_total, p);
+    decode(byte_used, p);
+    decode(byte_avail, p);
+    decode(avail_percent, p);
     DECODE_FINISH(p);
   }
 
@@ -69,6 +71,7 @@ struct ceph_data_stats
   }
 };
 typedef struct ceph_data_stats ceph_data_stats_t;
+WRITE_CLASS_ENCODER(ceph_data_stats)
 
 int get_fs_stats(ceph_data_stats_t &stats, const char *path);
 
@@ -80,5 +83,12 @@ void collect_sys_info(map<string, string> *m, CephContext *cct);
 /// @param services a map from hostname to a list of service id hosted by this host
 /// @param type the service type of given @p services, for example @p osd or @p mon.
 void dump_services(Formatter* f, const map<string, list<int> >& services, const char* type);
+/// dump service names grouped by their host to the specified formatter
+/// @param f formatter for the output
+/// @param services a map from hostname to a list of service name hosted by this host
+/// @param type the service type of given @p services, for example @p osd or @p mon.
+void dump_services(Formatter* f, const map<string, list<string> >& services, const char* type);
 
+string cleanbin(bufferlist &bl, bool &b64);
+string cleanbin(string &str);
 #endif /* CEPH_UTIL_H */

@@ -15,12 +15,8 @@
 #ifndef CEPH_COMMON_ENTITY_NAME_H
 #define CEPH_COMMON_ENTITY_NAME_H
 
-#include <iosfwd>
-#include <stdint.h>
-#include <string>
+#include <ifaddrs.h>
 
-#include "include/encoding.h"
-#include "include/buffer_fwd.h"
 #include "msg/msg_types.h"
 
 /* Represents a Ceph entity name.
@@ -33,14 +29,16 @@ struct EntityName
   EntityName();
 
   void encode(bufferlist& bl) const {
-    ::encode(type, bl);
-    ::encode(id, bl);
+    using ceph::encode;
+    encode(type, bl);
+    encode(id, bl);
   }
   void decode(bufferlist::iterator& bl) {
+    using ceph::decode;
     uint32_t type_;
     std::string id_;
-    ::decode(type_, bl);
-    ::decode(id_, bl);
+    decode(type_, bl);
+    decode(id_, bl);
     set(type_, id_);
   }
 

@@ -22,8 +22,8 @@ struct JournalTrimmer::C_RemoveSet : public Context {
 
   C_RemoveSet(JournalTrimmer *_journal_trimmer, uint64_t _object_set,
               uint8_t _splay_width);
-  virtual void complete(int r);
-  virtual void finish(int r) {
+  void complete(int r) override;
+  void finish(int r) override {
     journal_trimmer->handle_set_removed(r, object_set);
     journal_trimmer->m_async_op_tracker.finish_op();
   }
@@ -79,8 +79,10 @@ void JournalTrimmer::remove_objects(bool force, Context *on_finish) {
 
         if (registered_clients.size() == 0) {
           on_finish->complete(-EINVAL);
+          return;
         } else if (registered_clients.size() > 1) {
           on_finish->complete(-EBUSY);
+          return;
         }
       }
 
@@ -109,7 +111,7 @@ void JournalTrimmer::trim_objects(uint64_t minimum_set) {
   }
 
   if (m_remove_set_pending) {
-    m_remove_set = MAX(m_remove_set, minimum_set);
+    m_remove_set = std::max(m_remove_set, minimum_set);
     return;
   }
 

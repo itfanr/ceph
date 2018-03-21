@@ -21,19 +21,18 @@
 
 #include <stdio.h>
 #include <signal.h>
+
+#include <chrono>
+#include <list>
+#include <mutex>
+#include <random>
+#include <thread>
+
+#include "gtest/gtest.h"
 #include "common/Mutex.h"
 #include "common/Thread.h"
 #include "common/Throttle.h"
 #include "common/ceph_argparse.h"
-#include "global/global_init.h"
-#include <gtest/gtest.h>
-
-#include <thread>
-#include <atomic>
-#include <chrono>
-#include <mutex>
-#include <list>
-#include <random>
 
 class ThrottleTest : public ::testing::Test {
 protected:
@@ -42,30 +41,21 @@ protected:
   public:
     Throttle &throttle;
     int64_t count;
-    bool waited;
+    bool waited = false;
 
     Thread_get(Throttle& _throttle, int64_t _count) :
-      throttle(_throttle),
-      count(_count),
-      waited(false)
-    {
-    }
+      throttle(_throttle), count(_count) {}
 
-    virtual void *entry() {
+    void *entry() override {
       usleep(5);
       waited = throttle.get(count);
       throttle.put(count);
-      return NULL;
+      return nullptr;
     }
   };
-
 };
 
 TEST_F(ThrottleTest, Throttle) {
-  ASSERT_DEATH({
-      Throttle throttle(g_ceph_context, "throttle", -1);
-    }, "");
-
   int64_t throttle_max = 10;
   Throttle throttle(g_ceph_context, "throttle", throttle_max);
   ASSERT_EQ(throttle.get_max(), throttle_max);
@@ -75,7 +65,6 @@ TEST_F(ThrottleTest, Throttle) {
 TEST_F(ThrottleTest, take) {
   int64_t throttle_max = 10;
   Throttle throttle(g_ceph_context, "throttle", throttle_max);
-  ASSERT_DEATH(throttle.take(-1), "");
   ASSERT_EQ(throttle.take(throttle_max), throttle_max);
   ASSERT_EQ(throttle.take(throttle_max), throttle_max * 2);
 }
@@ -91,7 +80,6 @@ TEST_F(ThrottleTest, get) {
     ASSERT_EQ(throttle.put(throttle_max), 0);
   }
 
-  ASSERT_DEATH(throttle.get(-1), "");
   ASSERT_FALSE(throttle.get(5));
   ASSERT_EQ(throttle.put(5), 0);
 
@@ -223,44 +211,6 @@ TEST_F(ThrottleTest, wait) {
   } while(!waited);
 }
 
-TEST_F(ThrottleTest, destructor) {
-  Thread_get *t;
-  {
-    int64_t throttle_max = 10;
-    Throttle *throttle = new Throttle(g_ceph_context, "throttle", throttle_max);
-
-    ASSERT_FALSE(throttle->get(5));
-
-    t = new Thread_get(*throttle, 7);
-    t->create("t_throttle");
-    bool blocked;
-    useconds_t delay = 1;
-    do {
-      usleep(delay);
-      if (throttle->get_or_fail(1)) {
-	throttle->put(1);
-	blocked = false;
-      } else {
-	blocked = true;
-      }
-      delay *= 2;
-    } while(!blocked);
-    delete throttle;
-  }
-
-  { //
-    // The thread is left hanging, otherwise it will abort().
-    // Deleting the Throttle on which it is waiting creates a
-    // inconsistency that will be detected: the Throttle object that
-    // it references no longer exists.
-    //
-    pthread_t id = t->get_thread_id();
-    ASSERT_EQ(pthread_kill(id, 0), 0);
-    delete t;
-    ASSERT_EQ(pthread_kill(id, 0), 0);
-  }
-}
-
 std::pair<double, std::chrono::duration<double> > test_backoff(
   double low_threshhold,
   double high_threshhold,
@@ -285,7 +235,7 @@ std::pair<double, std::chrono::duration<double> > test_backoff(
   uint64_t total_observed_total = 0;
   uint64_t total_observations = 0;
 
-  BackoffThrottle throttle(5);
+  BackoffThrottle throttle(g_ceph_context, "backoff_throttle_test", 5);
   bool valid = throttle.set_params(
     low_threshhold,
     high_threshhold,
@@ -424,24 +374,12 @@ TEST(BackoffThrottle, oversaturated)
   ASSERT_GT(results.second.count(), 0.0005);
 }
 
-int main(int argc, char **argv) {
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
-
 /*
  * Local Variables:
  * compile-command: "cd ../.. ;
  *   make unittest_throttle ;
- *   ./unittest_throttle # --gtest_filter=ThrottleTest.destructor \
+ *   ./unittest_throttle # --gtest_filter=ThrottleTest.take \
  *       --log-to-stderr=true --debug-filestore=20
  * "
  * End:
  */
-

@@ -40,15 +40,15 @@ class JournalPointer {
 
   void encode(bufferlist &bl) const {
     ENCODE_START(1, 1, bl);
-    ::encode(front, bl);
-    ::encode(back, bl);
+    encode(front, bl);
+    encode(back, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::iterator &bl) {
     DECODE_START(1, bl);
-    ::decode(front, bl);
-    ::decode(back, bl);
+    decode(front, bl);
+    decode(back, bl);
     DECODE_FINISH(bl);
   }
 
@@ -82,5 +82,6 @@ class JournalPointer {
     ls.back()->back = 0xfeedbead;
   }
 };
+WRITE_CLASS_ENCODER(JournalPointer)
 
 #endif // JOURNAL_POINTER_H

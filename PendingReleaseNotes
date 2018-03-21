@@ -1,79 +1,101 @@
->= 11.0.0
+13.0.1
 ------
 
-* The list of monitor hosts/addresses for building the monmap can now be
-  obtained from DNS SRV records. The service name used in when querying the DNS 
-  is defined in the "mon_dns_srv_name" config option, which defaults to
-  "ceph-mon".
+* *CephFS*:
 
-* The 'osd class load list' config option is a list of object class names that
-  the OSD is permitted to load (or '*' for all classes). By default it
-  contains all existing in-tree classes for backwards compatibility.
+  * Upgrading an MDS cluster to 12.2.3+ will result in all active MDS
+    exiting due to feature incompatibilities once an upgraded MDS comes online
+    (even as standby). Operators may ignore the error messages and continue
+    upgrading/restarting or follow this upgrade sequence:
 
-* The 'osd class default list' config option is a list of object class names
-  (or '*' for all classes) that clients may invoke having only the '*', 'x',
-  'class-read', or 'class-write' capabilities. By default it contains all
-  existing in-tree classes for backwards compatibility. Invoking classes not
-  listed in 'osd class default list' requires a capability naming the class
-  (e.g. 'allow class foo').
+    Reduce the number of ranks to 1 (`ceph fs set <fs_name> max_mds 1`),
+    deactivate all other ranks (`ceph mds deactivate <fs_name>:<n>`), shutdown
+    standbys leaving the one active MDS, upgrade the single active MDS, then
+    upgrade/start standbys. Finally, restore the previous max_mds.
 
-* The 'rgw rest getusage op compat' config option allows you to dump the description of user stats
-  or not in s3 GetUsage API. This config option is of bool type and defaults to false.
-  If the value is true, the reponse data of s3 GetUsage like below:
+    See also: https://tracker.ceph.com/issues/23172
 
-    "stats": {
-                "TotalBytes": 516,
-                "TotalBytesRounded": 1024,
-                "TotalEntries": 1
-             }
+  * Several "ceph mds" commands have been obsoleted and replaced
+    by equivalent "ceph fs" commands:
+      - mds dump -> fs dump
+      - mds getmap -> fs dump
+      - mds stop -> mds deactivate
+      - mds set_max_mds -> fs set max_mds
+      - mds set -> fs set
+      - mds cluster_down -> fs set cluster_down true
+      - mds cluster_up -> fs set cluster_down false
+      - mds add_data_pool -> fs add_data_pool
+      - mds remove_data_pool -> fs rm_data_pool
+      - mds rm_data_pool -> fs rm_data_pool
 
-  Or if the value is false, the  reponse of s3 GetUsage like below and as it does before we add this config option:
+  * New CephFS file system attributes session_timeout and session_autoclose
+    are configurable via `ceph fs set`. The MDS config options
+    mds_session_timeout, mds_session_autoclose, and mds_max_file_size are now
+    obsolete.
 
-    {
-         516,
-         1024,
-         1
-    }.
+* *RBD*
 
-11.0.0
+  * The RBD C API's rbd_discard method now enforces a maximum length of
+    2GB to match the C++ API's Image::discard method. This restriction
+    prevents overflow of the result code.
+
+  * The rbd CLI's "lock list" JSON and XML output has changed.
+
+  * The rbd CLI's "showmapped" JSON and XML output has changed.
+
+  * RBD now optionally supports simplified image clone semantics where
+    non-protected snapshots can be cloned; and snapshots with linked clones
+    can be removed and the space automatically reclaimed once all remaining
+    linked clones are detached. This feature is enabled by default if
+    the OSD "require-min-compat-client" flag is set to mimic or later; or can be
+    overridden via the "rbd_default_clone_format" configuration option.
+
+* The sample ``crush-location-hook`` script has been removed.  Its output is
+  equivalent to the built-in default behavior, so it has been replaced with an
+  example in the CRUSH documentation.
+
+* The "rcceph" script (systemd/ceph in the source code tree, shipped as
+  /usr/sbin/rcceph in the ceph-base package for CentOS and SUSE) has been
+  dropped. This script was used to perform admin operations (start, stop,
+  restart, etc.) on all OSD and/or MON daemons running on a given machine.
+  This functionality is provided by the systemd target units (ceph-osd.target,
+  ceph-mon.target, etc.).
+
+* The python-ceph-compat package is declared deprecated, and will be dropped
+  when all supported distros have completed the move to Python 3. It has
+  already been dropped from those supported distros where Python 3 is standard
+  and Python 2 is optional (currently only SUSE).
+
+* The -f option of the rados tool now means "--format" instead of "--force",
+  for consistency with the ceph tool.
+
+
+>= 13.0.2
+---------
+
+The ceph-rest-api command-line tool (obsoleted by the MGR "restful" module and
+deprecated since v12.2.5) has been dropped.
+
+There is a MGR module called "restful" which provides similar functionality
+via a "pass through" method. See http://docs.ceph.com/docs/master/mgr/restful
+for details.
+
+
+>= 12.2.5
+---------
+
+The ceph-rest-api command-line tool included in the ceph-mon package has been
+obsoleted by the MGR "restful" module. The ceph-rest-api tool is hereby
+declared deprecated and will be dropped in Mimic.
+
+The MGR "restful" module provides similar functionality via a "pass through"
+method. See http://docs.ceph.com/docs/luminous/mgr/restful for details.
+
+
+13.0.2
 ------
 
-* If you have manually specified the monitor user rocksdb via the
-  ``mon keyvaluedb = rocksdb`` option, you will need to manually add a file
-  to the mon data directory to preserve this option::
+* The format of the 'config diff' output via the admin socket has changed.  It
+  now reflects the source of each config option (e.g., default, config file,
+  command line) as well as the final (active) value.
 
-     echo rocksdb > /var/lib/ceph/mon/ceph-`hostname`/kv_backend
-
-  New monitors will now use rocksdb by default, but if that file is
-  not present, existing monitors will use leveldb.  The ``mon keyvaluedb`` option
-  now only affects the backend chosen when a monitor is created.
-
-* The 'osd crush initial weight' option allows you to specify a CRUSH
-  weight for a newly added OSD.  Previously a value of 0 (the default)
-  meant that we should use the size of the OSD's store to weight the
-  new OSD.  Now, a value of 0 means it should have a weight of 0, and
-  a negative value (the new default) means we should automatically
-  weight the OSD based on its size.  If your configuration file
-  explicitly specifies a value of 0 for this option you will need to
-  change it to a negative value (e.g., -1) to preserve the current
-  behavior.
-
-* The `osd crush location` config option is no longer supported.  Please
-  update your ceph.conf to use the `crush location` option instead.
-
-* The static libraries are not included by the debian development packages
-  (lib*-dev) any more. As it is not required per debian packaging policy.
-  And their shared versions are packaged as before.
-
-* The libtool pseudo-libraries (.la files) are not included by the debian
-  development packages (lib*-dev) any more. As it is unneeded, and per
-  https://wiki.debian.org/ReleaseGoals/LAFileRemoval and
-  https://www.debian.org/doc/manuals/maint-guide/advanced.en.html,
-  we should remove them.
-
-* The jerasure and shec plugins can now detect SIMD instruction at runtime
-  and no longer need to be built for different processors. The following 
-  plugins are now deprecated: jerasure_generic, jerasure_sse3, jerasure_sse4, 
-  jerasure_neon, shec_generic, shec_sse3, shec_sse4, and shec_neon. If you use any
-  of these plugins directly you will see a warning in the mon log file.
-  Please switch to using just 'jerasure' or 'shec'.

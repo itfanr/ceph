@@ -28,20 +28,21 @@ class MExportCapsAck : public Message {
   MExportCapsAck(inodeno_t i) :
     Message(MSG_MDS_EXPORTCAPSACK), ino(i) {}
 private:
-  ~MExportCapsAck() {}
+  ~MExportCapsAck() override {}
 
 public:
-  const char *get_type_name() const { return "export_caps_ack"; }
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "export_caps_ack"; }
+  void print(ostream& o) const override {
     o << "export_caps_ack(" << ino << ")";
   }
 
-  virtual void encode_payload(uint64_t features) {
-    ::encode(ino, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(ino, payload);
   }
-  virtual void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
-    ::decode(ino, p);
+    decode(ino, p);
   }
 
 };

@@ -13,9 +13,7 @@
 #include <string>
 
 class Context;
-class ContextWQ;
 class Mutex;
-class SafeTimer;
 
 namespace journal {
 
@@ -108,6 +106,8 @@ struct MockJournaler {
   MOCK_METHOD2(get_cached_client, int(const std::string&, cls::journal::Client*));
   MOCK_METHOD2(update_client, void(const bufferlist &, Context *));
 
+  MOCK_METHOD4(allocate_tag, void(uint64_t, const bufferlist &,
+                                  cls::journal::Tag*, Context *));
   MOCK_METHOD3(get_tag, void(uint64_t, cls::journal::Tag *, Context *));
   MOCK_METHOD3(get_tags, void(uint64_t, journal::Journaler::Tags*, Context*));
   MOCK_METHOD4(get_tags, void(uint64_t, uint64_t, journal::Journaler::Tags*,
@@ -138,14 +138,20 @@ struct MockJournaler {
 };
 
 struct MockJournalerProxy {
+  MockJournalerProxy() {
+    MockJournaler::get_instance().construct();
+  }
+
   template <typename IoCtxT>
   MockJournalerProxy(IoCtxT &header_ioctx, const std::string &,
                      const std::string &, const Settings&) {
     MockJournaler::get_instance().construct();
   }
 
-  MockJournalerProxy(ContextWQ *work_queue, SafeTimer *timer, Mutex *timer_lock,
-                     librados::IoCtx &header_ioctx, const std::string &journal_id,
+  template <typename WorkQueue, typename Timer>
+  MockJournalerProxy(WorkQueue *work_queue, Timer *timer, Mutex *timer_lock,
+                     librados::IoCtx &header_ioctx,
+                     const std::string &journal_id,
                      const std::string &client_id, const Settings&) {
     MockJournaler::get_instance().construct();
   }
@@ -163,9 +169,10 @@ struct MockJournalerProxy {
     return -EINVAL;
   }
 
-  void allocate_tag(uint64_t, const bufferlist &,
-                    cls::journal::Tag*, Context *on_finish) {
-    on_finish->complete(-EINVAL);
+  void allocate_tag(uint64_t tag_class, const bufferlist &tag_data,
+                    cls::journal::Tag* tag, Context *on_finish) {
+    MockJournaler::get_instance().allocate_tag(tag_class, tag_data, tag,
+                                               on_finish);
   }
 
   void init(Context *on_finish) {

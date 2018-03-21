@@ -95,9 +95,10 @@
 
 
 void parse_syn_options(vector<const char*>& args);
+extern int num_client;
 
 class SyntheticClient {
-  Client *client;
+  StandaloneClient *client;
   int whoami;
 
   pthread_t thread_id;
@@ -168,7 +169,7 @@ class SyntheticClient {
   }
 
  public:
-  SyntheticClient(Client *client, int w = -1);
+  SyntheticClient(StandaloneClient *client, int w = -1);
 
   int start_thread();
   int join_thread();
@@ -207,12 +208,12 @@ class SyntheticClient {
   }
 
   bool time_to_stop() {
-    utime_t now = ceph_clock_now(client->cct);
-    if (0) cout << "time_to_stop .. now " << now 
-		<< " until " << run_until 
-		<< " start " << run_start 
+    utime_t now = ceph_clock_now();
+    if (0) cout << "time_to_stop .. now " << now
+		<< " until " << run_until
+		<< " start " << run_start
 		<< std::endl;
-    if (run_until.sec() && now > run_until) 
+    if (run_until.sec() && now > run_until)
       return true;
     else
       return false;

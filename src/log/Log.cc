@@ -6,25 +6,18 @@
 #include <errno.h>
 #include <syslog.h>
 
-#include <iostream>
-#include <sstream>
-
-#include <boost/asio.hpp>
-#include <boost/iostreams/filtering_stream.hpp>
-#include <boost/iostreams/filter/zlib.hpp>
-#include <boost/shared_ptr.hpp>
-
 #include "common/errno.h"
 #include "common/safe_io.h"
 #include "common/Clock.h"
 #include "common/Graylog.h"
 #include "common/valgrind.h"
-#include "common/Formatter.h"
+
 #include "include/assert.h"
 #include "include/compat.h"
 #include "include/on_exit.h"
-#include "include/uuid.h"
+
 #include "Entry.h"
+#include "LogClock.h"
 #include "SubsystemMap.h"
 
 #define DEFAULT_MAX_NEW    100
@@ -34,7 +27,7 @@
 
 
 namespace ceph {
-namespace log {
+namespace logging {
 
 static OnExitManager exit_callbacks;
 
@@ -102,6 +95,12 @@ Log::~Log()
 
 
 ///
+void Log::set_coarse_timestamps(bool coarse) {
+  if (coarse)
+    clock.coarsen();
+  else
+    clock.refine();
+}
 
 void Log::set_flush_on_exit()
 {
@@ -132,6 +131,11 @@ void Log::set_max_recent(int n)
 void Log::set_log_file(string fn)
 {
   m_log_file = fn;
+}
+
+void Log::set_log_stderr_prefix(const std::string& p)
+{
+  m_log_stderr_prefix = p;
 }
 
 void Log::reopen_log_file()
@@ -199,7 +203,7 @@ void Log::start_graylog()
 {
   pthread_mutex_lock(&m_flush_mutex);
   if (! m_graylog.get())
-    m_graylog = Graylog::Ref(new Graylog(m_subs, "dlog"));
+    m_graylog = std::make_shared<Graylog>(m_subs, "dlog");
   pthread_mutex_unlock(&m_flush_mutex);
 }
 
@@ -213,6 +217,8 @@ void Log::stop_graylog()
 
 void Log::submit_entry(Entry *e)
 {
+  e->finish();
+
   pthread_mutex_lock(&m_queue_mutex);
   m_queue_mutex_holder = pthread_self();
 
@@ -230,16 +236,16 @@ void Log::submit_entry(Entry *e)
 }
 
 
-Entry *Log::create_entry(int level, int subsys)
+Entry *Log::create_entry(int level, int subsys, const char* msg)
 {
   if (true) {
-    return new Entry(ceph_clock_now(NULL),
-		   pthread_self(),
-		   level, subsys);
+    return new Entry(clock.now(),
+		     pthread_self(),
+		     level, subsys, msg);
   } else {
     // kludge for perf testing
     Entry *e = m_recent.dequeue();
-    e->m_stamp = ceph_clock_now(NULL);
+    e->m_stamp = clock.now();
     e->m_thread = pthread_self();
     e->m_prio = level;
     e->m_subsys = subsys;
@@ -254,13 +260,13 @@ Entry *Log::create_entry(int level, int subsys, size_t* expected_size)
                                "Log hint");
     size_t size = __atomic_load_n(expected_size, __ATOMIC_RELAXED);
     void *ptr = ::operator new(sizeof(Entry) + size);
-    return new(ptr) Entry(ceph_clock_now(NULL),
+    return new(ptr) Entry(clock.now(),
        pthread_self(), level, subsys,
        reinterpret_cast<char*>(ptr) + sizeof(Entry), size, expected_size);
   } else {
     // kludge for perf testing
     Entry *e = m_recent.dequeue();
-    e->m_stamp = ceph_clock_now(NULL);
+    e->m_stamp = clock.now();
     e->m_thread = pthread_self();
     e->m_prio = level;
     e->m_subsys = subsys;
@@ -283,7 +289,7 @@ void Log::flush()
 
   // trim
   while (m_recent.m_len > m_max_recent) {
-    delete m_recent.dequeue();
+    m_recent.dequeue()->destroy();
   }
 
   m_flush_mutex_holder = 0;
@@ -319,7 +325,7 @@ void Log::_flush(EntryQueue *t, EntryQueue *requeue, bool crash)
 
       if (crash)
 	buflen += snprintf(buf, buf_size, "%6d> ", -t->m_len);
-      buflen += e->m_stamp.sprintf(buf + buflen, buf_size-buflen);
+      buflen += append_time(e->m_stamp, buf + buflen, buf_size - buflen);
       buflen += snprintf(buf + buflen, buf_size-buflen, " %lx %2d ",
 			(unsigned long)e->m_thread, e->m_prio);
 
@@ -335,7 +341,7 @@ void Log::_flush(EntryQueue *t, EntryQueue *requeue, bool crash)
       }
 
       if (do_stderr) {
-        cerr << buf << std::endl;
+        cerr << m_log_stderr_prefix << buf << std::endl;
       }
       if (do_fd) {
         buf[buflen] = '\n';
@@ -362,9 +368,12 @@ void Log::_flush(EntryQueue *t, EntryQueue *requeue, bool crash)
 void Log::_log_message(const char *s, bool crash)
 {
   if (m_fd >= 0) {
-    int r = safe_write(m_fd, s, strlen(s));
-    if (r >= 0)
-      r = safe_write(m_fd, "\n", 1);
+    size_t len = strlen(s);
+    std::string b;
+    b.reserve(len + 1);
+    b.append(s, len);
+    b += '\n';
+    int r = safe_write(m_fd, b.c_str(), b.size());
     if (r < 0)
       cerr << "problem writing to " << m_log_file << ": " << cpp_strerror(r) << std::endl;
   }
@@ -398,10 +407,8 @@ void Log::dump_recent()
 
   char buf[4096];
   _log_message("--- logging levels ---", true);
-  for (vector<Subsystem>::iterator p = m_subs->m_subsys.begin();
-       p != m_subs->m_subsys.end();
-       ++p) {
-    snprintf(buf, sizeof(buf), "  %2d/%2d %s", p->log_level, p->gather_level, p->name.c_str());
+  for (const auto& p : m_subs->m_subsys) {
+    snprintf(buf, sizeof(buf), "  %2d/%2d %s", p.log_level, p.gather_level, p.name);
     _log_message(buf, true);
   }
 
@@ -433,13 +440,14 @@ void Log::start()
 
 void Log::stop()
 {
-  assert(is_started());
-  pthread_mutex_lock(&m_queue_mutex);
-  m_stop = true;
-  pthread_cond_signal(&m_cond_flusher);
-  pthread_cond_broadcast(&m_cond_loggers);
-  pthread_mutex_unlock(&m_queue_mutex);
-  join();
+  if (is_started()) {
+    pthread_mutex_lock(&m_queue_mutex);
+    m_stop = true;
+    pthread_cond_signal(&m_cond_flusher);
+    pthread_cond_broadcast(&m_cond_loggers);
+    pthread_mutex_unlock(&m_queue_mutex);
+    join();
+  }
 }
 
 void *Log::entry()
@@ -476,5 +484,10 @@ void Log::inject_segv()
   m_inject_segv = true;
 }
 
-} // ceph::log::
+void Log::reset_segv()
+{
+  m_inject_segv = false;
+}
+
+} // ceph::logging::
 } // ceph::

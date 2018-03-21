@@ -15,11 +15,12 @@
 #ifndef CEPH_OBJ_BENCHER_H
 #define CEPH_OBJ_BENCHER_H
 
-#include "common/config.h"
-#include "common/Cond.h"
 #include "common/ceph_context.h"
 #include "common/Formatter.h"
+#include "ceph_time.h"
 #include <cfloat>
+
+using ceph::mono_clock;
 
 struct bench_interval_data {
   double min_bandwidth = DBL_MAX;
@@ -38,6 +39,7 @@ struct bench_data {
   bool done; //is the benchmark is done
   uint64_t object_size; //the size of the objects
   uint64_t op_size;     // the size of the read/write ops
+  bool hints;
   // same as object_size for write tests
   int in_flight; //number of reads/writes being waited on
   int started;
@@ -47,8 +49,8 @@ struct bench_data {
   double avg_latency;
   struct bench_interval_data idata; // data that is updated by time intervals and not by events
   struct bench_history history; // data history, used to calculate stddev
-  utime_t cur_latency; //latency of last completed transaction
-  utime_t start_time; //start time for benchmark
+  std::chrono::duration<double> cur_latency; //latency of last completed transaction - in seconds by default
+  mono_time start_time; //start time for benchmark - use the monotonic clock as we'll measure the passage of time
   char *object_contents; //pointer to the contents written to each object
 };
 
@@ -110,7 +112,7 @@ public:
   int aio_bench(
     int operation, int secondsToRun,
     int concurrentios, uint64_t op_size, uint64_t object_size, unsigned max_objects,
-    bool cleanup, const std::string& run_name, bool no_verify=false);
+    bool cleanup, bool hints, const std::string& run_name, bool no_verify=false);
   int clean_up(const std::string& prefix, int concurrentios, const std::string& run_name);
 
   void set_show_time(bool dt) {

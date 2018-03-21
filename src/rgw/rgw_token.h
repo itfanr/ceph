@@ -62,7 +62,6 @@ namespace rgw {
       default:
 	return "none";
       };
-      return "none";
     }
 
     token_type type;
@@ -94,11 +93,11 @@ namespace rgw {
       uint32_t ver = version();
       string typestr{from_type(type)};
       ENCODE_START(1, 1, bl);
-      ::encode(type_name, bl);
-      ::encode(ver, bl);
-      ::encode(typestr, bl);
-      ::encode(id, bl);
-      ::encode(key, bl);
+      encode(type_name, bl);
+      encode(ver, bl);
+      encode(typestr, bl);
+      encode(id, bl);
+      encode(key, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -107,12 +106,12 @@ namespace rgw {
       string typestr;
       uint32_t version;
       DECODE_START(1, bl);
-      ::decode(name, bl);
-      ::decode(version, bl);
-      ::decode(typestr, bl);
-      type = to_type(typestr.c_str());
-      ::decode(id, bl);
-      ::decode(key, bl);
+      decode(name, bl);
+      decode(version, bl);
+      decode(typestr, bl);
+      type = to_type(typestr);
+      decode(id, bl);
+      decode(key, bl);
       DECODE_FINISH(bl);
     }
 
@@ -136,7 +135,7 @@ namespace rgw {
       string typestr;
       JSONDecoder::decode_json("version", version, obj);
       JSONDecoder::decode_json("type", typestr, obj);
-      type = to_type(typestr.c_str());
+      type = to_type(typestr);
       JSONDecoder::decode_json("id", id, obj);
       JSONDecoder::decode_json("key", key, obj);
     }
@@ -145,7 +144,7 @@ namespace rgw {
       encode_json(f);
       std::ostringstream os;
       f->flush(os);
-      return std::move(to_base64(std::move(os.str())));
+      return to_base64(std::move(os.str()));
     }
 
     friend inline ostream& operator<<(ostream& os, const RGWToken& token);

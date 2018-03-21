@@ -60,7 +60,7 @@ void DispatchQueue::post_dispatch(Message *m, uint64_t msize)
   ldout(cct,20) << "done calling dispatch on " << m << dendl;
 }
 
-bool DispatchQueue::can_fast_dispatch(Message *m) const
+bool DispatchQueue::can_fast_dispatch(const Message *m) const
 {
   return msgr->ms_can_fast_dispatch(m);
 }
@@ -81,6 +81,10 @@ void DispatchQueue::enqueue(Message *m, int priority, uint64_t id)
 {
 
   Mutex::Locker l(lock);
+  if (stop) {
+    m->put();
+    return;
+  }
   ldout(cct,20) << "queue " << m << " prio " << priority << dendl;
   add_arrival(m);
   if (priority >= CEPH_MSG_PRIO_LOW) {
@@ -95,7 +99,7 @@ void DispatchQueue::enqueue(Message *m, int priority, uint64_t id)
 
 void DispatchQueue::local_delivery(Message *m, int priority)
 {
-  m->set_recv_stamp(ceph_clock_now(msgr->cct));
+  m->set_recv_stamp(ceph_clock_now());
   Mutex::Locker l(local_delivery_lock);
   if (local_messages.empty())
     local_delivery_cond.Signal();
@@ -185,7 +189,7 @@ void DispatchQueue::entry()
 	  msgr->ms_deliver_handle_refused(qitem.get_connection());
 	  break;
 	default:
-	  assert(0);
+	  ceph_abort();
 	}
       } else {
 	Message *m = qitem.get_message();

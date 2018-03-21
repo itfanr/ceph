@@ -4,17 +4,21 @@ if test -e build; then
     echo 'build dir already exists; rm -rf build and re-run'
     exit 1
 fi
+
+if which ccache ; then
+    echo "enabling ccache"
+    ARGS="$ARGS -DWITH_CCACHE=ON"
+fi
+
 mkdir build
 cd build
-cmake $@ ..
+NPROC=${NPROC:-$(nproc)}
+cmake -DBOOST_J=$NPROC $ARGS "$@" ..
 
 # minimal config to find plugins
 cat <<EOF > ceph.conf
 plugin dir = lib
 erasure code dir = lib
 EOF
-
-# give vstart a (hopefully) unique mon port to start with
-echo $(( RANDOM % 1000 + 40000 )) > .ceph_port
 
 echo done.

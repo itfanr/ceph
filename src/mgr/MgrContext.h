@@ -15,26 +15,9 @@
 #define MGR_CONTEXT_H_
 
 #include <memory>
-#include "include/Context.h"
 
 #include "common/ceph_json.h"
 #include "mon/MonClient.h"
-
-class C_StdFunction : public Context
-{
-private:
-  std::function<void()> fn;
-
-public:
-  C_StdFunction(std::function<void()> fn_)
-    : fn(fn_)
-  {}
-
-  void finish(int r)
-  {
-    fn();
-  }
-};
 
 class Command
 {
@@ -65,7 +48,7 @@ class JSONCommand : public Command
 public:
   json_spirit::mValue json_result;
 
-  void wait()
+  void wait() override
   {
     Command::wait();
 

@@ -14,9 +14,11 @@
 #ifndef CEPH_FSMAPCOMPACT_H
 #define CEPH_FSMAPCOMPACT_H
 
-#include "mds/mdstypes.h"
 #include <map>
 #include <string>
+#include <string_view>
+
+#include "mds/mdstypes.h"
 
 class FSMapUser {
 public:
@@ -35,21 +37,9 @@ public:
   FSMapUser()
     : epoch(0), legacy_client_fscid(FS_CLUSTER_ID_NONE) { }
 
-  FSMapUser(const FSMapUser &o)
-    : epoch(o.epoch), legacy_client_fscid(o.legacy_client_fscid),
-      filesystems(o.filesystems) { }
-
-  FSMapUser &operator=(const FSMapUser &o)
-  {
-    epoch = o.epoch;
-    legacy_client_fscid = o.legacy_client_fscid;
-    filesystems = o.filesystems;
-    return *this;
-  }
-
   epoch_t get_epoch() const { return epoch; }
 
-  fs_cluster_id_t get_fs_cid(const std::string &name) const {
+  fs_cluster_id_t get_fs_cid(std::string_view name) const {
     for (auto &p : filesystems) {
       if (p.second.name == name)
 	return p.first;

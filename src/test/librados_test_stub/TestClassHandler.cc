@@ -11,6 +11,7 @@
 #include "common/debug.h"
 #include "include/assert.h"
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rados
 
 namespace librados {
@@ -46,16 +47,14 @@ void TestClassHandler::open_all_classes() {
   assert(m_class_handles.empty());
 
   const char* env = getenv("CEPH_LIB");
-  std::string CEPH_LIB(env ? env : ".libs");
+  std::string CEPH_LIB(env ? env : "lib");
   DIR *dir = ::opendir(CEPH_LIB.c_str());
   if (dir == NULL) {
-    assert(false);;
+    ceph_abort();;
   }
 
-  char buf[offsetof(struct dirent, d_name) + PATH_MAX + 1];
-  struct dirent *pde;
-  int r = 0;
-  while ((r = ::readdir_r(dir, (dirent *)&buf, &pde)) == 0 && pde) {
+  struct dirent *pde = nullptr;
+  while ((pde = ::readdir(dir))) {
     std::string name(pde->d_name);
     if (!boost::algorithm::starts_with(name, "libcls_") ||
         !boost::algorithm::ends_with(name, ".so")) {

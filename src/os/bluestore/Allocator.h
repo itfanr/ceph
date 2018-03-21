@@ -13,11 +13,8 @@
 #define CEPH_OS_BLUESTORE_ALLOCATOR_H
 
 #include <ostream>
-#include <boost/scoped_ptr.hpp>
 #include "include/assert.h"
 #include "os/bluestore/bluestore_types.h"
-
-class FreelistManager;
 
 class Allocator {
 public:
@@ -25,10 +22,6 @@ public:
 
   virtual int reserve(uint64_t need) = 0;
   virtual void unreserve(uint64_t unused) = 0;
-
-  virtual int allocate(
-    uint64_t need_size, uint64_t alloc_unit, int64_t hint,
-    uint64_t *offset, uint32_t *length) = 0;
 
   /*
    * Allocate required number of blocks in n number of extents.
@@ -39,33 +32,20 @@ public:
    * Apart from that extents can vary between these lower and higher limits according
    * to free block search algorithm and availability of contiguous space.
    */
-  virtual int alloc_extents(uint64_t want_size, uint64_t alloc_unit,
-                            uint64_t max_alloc_size, int64_t hint,
-                            std::vector<AllocExtent> *extents, int *count) = 0;
+  virtual int64_t allocate(uint64_t want_size, uint64_t alloc_unit,
+			   uint64_t max_alloc_size, int64_t hint,
+			   PExtentVector *extents) = 0;
 
-  int alloc_extents(uint64_t want_size, uint64_t alloc_unit,
-                    int64_t hint, std::vector<AllocExtent> *extents, int *count) {
-    return alloc_extents(want_size, alloc_unit, want_size, hint, extents, count);
+  int64_t allocate(uint64_t want_size, uint64_t alloc_unit,
+		   int64_t hint, PExtentVector *extents) {
+    return allocate(want_size, alloc_unit, want_size, hint, extents);
   }
 
-  virtual int release(
-    uint64_t offset, uint64_t length) = 0;
+  /* Bulk release. Implementations may override this method to handle the whole
+   * set at once. This could save e.g. unnecessary mutex dance. */
+  virtual void release(const interval_set<uint64_t>& release_set) = 0;
 
-  virtual int release_extents(std::vector<AllocExtent> *extents, int count) {
-    int res = 0;
-      for (int i = 0; i < count; i++) {
-        res = release((*extents)[i].offset, (*extents)[i].length);
-        if (res != 0) {
-	  break;
-        }
-      }
-    return res;
-  }
-
-  virtual void commit_start() = 0;
-  virtual void commit_finish() = 0;
-
-  virtual void dump(std::ostream& out) = 0;
+  virtual void dump() = 0;
 
   virtual void init_add_free(uint64_t offset, uint64_t length) = 0;
   virtual void init_rm_free(uint64_t offset, uint64_t length) = 0;
@@ -73,7 +53,8 @@ public:
   virtual uint64_t get_free() = 0;
 
   virtual void shutdown() = 0;
-  static Allocator *create(string type, int64_t size, int64_t block_size);
+  static Allocator *create(CephContext* cct, string type, int64_t size,
+			   int64_t block_size);
 };
 
 #endif

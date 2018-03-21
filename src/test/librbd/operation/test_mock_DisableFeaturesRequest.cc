@@ -6,9 +6,9 @@
 #include "test/librbd/mock/MockImageCtx.h"
 #include "test/librbd/mock/MockJournalPolicy.h"
 #include "cls/rbd/cls_rbd_client.h"
-#include "librbd/AioCompletion.h"
 #include "librbd/internal.h"
 #include "librbd/image/SetFlagsRequest.h"
+#include "librbd/io/AioCompletion.h"
 #include "librbd/mirror/DisableRequest.h"
 #include "librbd/journal/RemoveRequest.h"
 #include "librbd/journal/StandardPolicy.h"
@@ -203,16 +203,12 @@ public:
   }
 
   void expect_block_writes(MockOperationImageCtx &mock_image_ctx) {
-    EXPECT_CALL(*mock_image_ctx.aio_work_queue, block_writes(_))
+    EXPECT_CALL(*mock_image_ctx.io_work_queue, block_writes(_))
       .WillOnce(CompleteContext(0, mock_image_ctx.image_ctx->op_work_queue));
   }
 
   void expect_unblock_writes(MockOperationImageCtx &mock_image_ctx) {
-    EXPECT_CALL(*mock_image_ctx.aio_work_queue, unblock_writes()).Times(1);
-  }
-
-  void expect_set_journal_policy(MockOperationImageCtx &mock_image_ctx) {
-    EXPECT_CALL(mock_image_ctx, set_journal_policy(_)).Times(1);
+    EXPECT_CALL(*mock_image_ctx.io_work_queue, unblock_writes()).Times(1);
   }
 
   void expect_verify_lock_ownership(MockOperationImageCtx &mock_image_ctx) {
@@ -296,9 +292,13 @@ TEST_F(TestMockOperationDisableFeaturesRequest, All) {
 
   MockOperationImageCtx mock_image_ctx(*ictx);
   MockExclusiveLock mock_exclusive_lock;
-  MockJournal mock_journal;
+  MockJournal mock_journal_stack;
+  MockJournal *mock_journal = &mock_journal_stack;
+  if (features_to_disable & RBD_FEATURE_JOURNALING) {
+    mock_journal = new MockJournal();
+  }
   MockObjectMap mock_object_map;
-  initialize_features(ictx, mock_image_ctx, mock_exclusive_lock, mock_journal,
+  initialize_features(ictx, mock_image_ctx, mock_exclusive_lock, *mock_journal,
 		      mock_object_map);
 
   expect_verify_lock_ownership(mock_image_ctx);
@@ -316,7 +316,6 @@ TEST_F(TestMockOperationDisableFeaturesRequest, All) {
   }
   expect_block_requests(mock_image_ctx);
   if (features_to_disable & RBD_FEATURE_JOURNALING) {
-    expect_set_journal_policy(mock_image_ctx);
     expect_disable_mirror_request_send(mock_image_ctx,
                                        mock_disable_mirror_request, 0);
     expect_close_journal(mock_image_ctx, 0);
@@ -332,16 +331,13 @@ TEST_F(TestMockOperationDisableFeaturesRequest, All) {
 				  mock_set_flags_request, 0);
   }
   expect_notify_update(mock_image_ctx);
-  if (features_to_disable & RBD_FEATURE_JOURNALING) {
-    expect_set_journal_policy(mock_image_ctx);
-  }
   expect_unblock_requests(mock_image_ctx);
   expect_unblock_writes(mock_image_ctx);
   expect_handle_prepare_lock_complete(mock_image_ctx);
 
   C_SaferCond cond_ctx;
   MockDisableFeaturesRequest *req = new MockDisableFeaturesRequest(
-    mock_image_ctx, &cond_ctx, 0, features_to_disable);
+    mock_image_ctx, &cond_ctx, 0, features_to_disable, false);
   {
     RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
     req->send();
@@ -388,7 +384,7 @@ TEST_F(TestMockOperationDisableFeaturesRequest, ObjectMap) {
   C_SaferCond cond_ctx;
   MockDisableFeaturesRequest *req = new MockDisableFeaturesRequest(
     mock_image_ctx, &cond_ctx, 0,
-    RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF);
+    RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF, false);
   {
     RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
     req->send();
@@ -432,7 +428,7 @@ TEST_F(TestMockOperationDisableFeaturesRequest, ObjectMapError) {
   C_SaferCond cond_ctx;
   MockDisableFeaturesRequest *req = new MockDisableFeaturesRequest(
     mock_image_ctx, &cond_ctx, 0,
-    RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF);
+    RBD_FEATURE_OBJECT_MAP | RBD_FEATURE_FAST_DIFF, false);
   {
     RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
     req->send();
@@ -448,9 +444,9 @@ TEST_F(TestMockOperationDisableFeaturesRequest, Mirroring) {
 
   MockOperationImageCtx mock_image_ctx(*ictx);
   MockExclusiveLock mock_exclusive_lock;
-  MockJournal mock_journal;
+  MockJournal *mock_journal = new MockJournal();
   MockObjectMap mock_object_map;
-  initialize_features(ictx, mock_image_ctx, mock_exclusive_lock, mock_journal,
+  initialize_features(ictx, mock_image_ctx, mock_exclusive_lock, *mock_journal,
 		      mock_object_map);
 
   expect_verify_lock_ownership(mock_image_ctx);
@@ -463,21 +459,19 @@ TEST_F(TestMockOperationDisableFeaturesRequest, Mirroring) {
   expect_block_writes(mock_image_ctx);
   expect_is_journal_replaying(*mock_image_ctx.journal);
   expect_block_requests(mock_image_ctx);
-  expect_set_journal_policy(mock_image_ctx);
   expect_disable_mirror_request_send(mock_image_ctx,
                                      mock_disable_mirror_request, 0);
   expect_close_journal(mock_image_ctx, 0);
   expect_remove_journal_request_send(mock_image_ctx,
                                      mock_remove_journal_request, 0);
   expect_notify_update(mock_image_ctx);
-  expect_set_journal_policy(mock_image_ctx);
   expect_unblock_requests(mock_image_ctx);
   expect_unblock_writes(mock_image_ctx);
   expect_handle_prepare_lock_complete(mock_image_ctx);
 
   C_SaferCond cond_ctx;
   MockDisableFeaturesRequest *req = new MockDisableFeaturesRequest(
-    mock_image_ctx, &cond_ctx, 0, RBD_FEATURE_JOURNALING);
+    mock_image_ctx, &cond_ctx, 0, RBD_FEATURE_JOURNALING, false);
   {
     RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
     req->send();
@@ -493,9 +487,9 @@ TEST_F(TestMockOperationDisableFeaturesRequest, MirroringError) {
 
   MockOperationImageCtx mock_image_ctx(*ictx);
   MockExclusiveLock mock_exclusive_lock;
-  MockJournal mock_journal;
+  MockJournal *mock_journal = new MockJournal();
   MockObjectMap mock_object_map;
-  initialize_features(ictx, mock_image_ctx, mock_exclusive_lock, mock_journal,
+  initialize_features(ictx, mock_image_ctx, mock_exclusive_lock, *mock_journal,
 		      mock_object_map);
 
   expect_verify_lock_ownership(mock_image_ctx);
@@ -508,21 +502,19 @@ TEST_F(TestMockOperationDisableFeaturesRequest, MirroringError) {
   expect_block_writes(mock_image_ctx);
   expect_is_journal_replaying(*mock_image_ctx.journal);
   expect_block_requests(mock_image_ctx);
-  expect_set_journal_policy(mock_image_ctx);
   expect_disable_mirror_request_send(mock_image_ctx,
                                      mock_disable_mirror_request, -EINVAL);
   expect_close_journal(mock_image_ctx, 0);
   expect_remove_journal_request_send(mock_image_ctx,
                                      mock_remove_journal_request, 0);
   expect_notify_update(mock_image_ctx);
-  expect_set_journal_policy(mock_image_ctx);
   expect_unblock_requests(mock_image_ctx);
   expect_unblock_writes(mock_image_ctx);
   expect_handle_prepare_lock_complete(mock_image_ctx);
 
   C_SaferCond cond_ctx;
   MockDisableFeaturesRequest *req = new MockDisableFeaturesRequest(
-    mock_image_ctx, &cond_ctx, 0, RBD_FEATURE_JOURNALING);
+    mock_image_ctx, &cond_ctx, 0, RBD_FEATURE_JOURNALING, false);
   {
     RWLock::RLocker owner_locker(mock_image_ctx.owner_lock);
     req->send();

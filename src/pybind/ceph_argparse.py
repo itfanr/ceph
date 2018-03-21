@@ -7,7 +7,7 @@ daemon.
 
 Copyright (C) 2013 Inktank Storage, Inc.
 
-LGPL2.  See file COPYING.
+LGPL2.1.  See file COPYING.
 """
 from __future__ import print_function
 import copy
@@ -21,6 +21,9 @@ import stat
 import sys
 import threading
 import uuid
+
+
+FLAG_MGR = 8   # command is intended for mgr
 
 
 try:
@@ -46,6 +49,13 @@ class ArgumentNumber(ArgumentError):
 class ArgumentFormat(ArgumentError):
     """
     Argument value has wrong format
+    """
+    pass
+
+
+class ArgumentMissing(ArgumentError):
+    """
+    Argument value missing in a command
     """
     pass
 
@@ -392,6 +402,10 @@ class CephName(CephArgtype):
             self.nametype = "mgr"
             self.val = s
             return
+        elif s == "mon":
+            self.nametype = "mon"
+            self.val = s
+            return
         if s.find('.') == -1:
             raise ArgumentFormat('CephName: no . in {0}'.format(s))
         else:
@@ -604,7 +618,7 @@ class argdesc(object):
         else:
             self.t = t
             self.typeargs = kwargs
-            self.req = bool(req == True or req == 'True')
+            self.req = req in (True, 'True', 'true')
 
         self.name = name
         self.N = (n in ['n', 'N'])
@@ -884,9 +898,9 @@ def store_arg(desc, d):
         d[desc.name] = desc.instance.val
 
 
-def validate(args, signature, partial=False):
+def validate(args, signature, flags=0, partial=False):
     """
-    validate(args, signature, partial=False)
+    validate(args, signature, flags=0, partial=False)
 
     args is a list of either words or k,v pairs representing a possible
     command input following format of signature.  Runs a validation; no
@@ -917,12 +931,12 @@ def validate(args, signature, partial=False):
 
             # no arg, but not required?  Continue consuming mysig
             # in case there are later required args
-            if not myarg and not desc.req:
+            if myarg in (None, []) and not desc.req:
                 break
 
             # out of arguments for a required param?
             # Either return (if partial validation) or raise
-            if not myarg and desc.req:
+            if myarg in (None, []) and desc.req:
                 if desc.N and desc.numseen < 1:
                     # wanted N, didn't even get 1
                     if partial:
@@ -937,7 +951,7 @@ def validate(args, signature, partial=False):
                         return d
                     # special-case the "0 expected 1" case
                     if desc.numseen == 0 and desc.n == 1:
-                        raise ArgumentNumber(
+                        raise ArgumentMissing(
                             'missing required parameter {0}'.format(desc)
                         )
                     raise ArgumentNumber(
@@ -981,6 +995,9 @@ def validate(args, signature, partial=False):
         if save_exception:
             print(save_exception[0], 'not valid: ', save_exception[1], file=sys.stderr)
         raise ArgumentError("unused arguments: " + str(myargs))
+
+    if flags & FLAG_MGR:
+        d['target'] = ('mgr','')
 
     # Finally, success
     return d
@@ -1032,18 +1049,24 @@ def validate_command(sigdict, args, verbose=False):
             print("bestcmds_sorted: ", file=sys.stderr)
             pprint.PrettyPrinter(stream=sys.stderr).pprint(bestcmds_sorted)
 
+        ex = None
         # for everything in bestcmds, look for a true match
         for cmdsig in bestcmds_sorted:
             for cmd in cmdsig.values():
                 sig = cmd['sig']
                 try:
-                    valid_dict = validate(args, sig)
+                    valid_dict = validate(args, sig, flags=cmd.get('flags', 0))
                     found = cmd
                     break
                 except ArgumentPrefix:
                     # ignore prefix mismatches; we just haven't found
                     # the right command yet
                     pass
+                except ArgumentMissing as e:
+                    ex = e
+                    if len(bestcmds) == 1:
+                        found = cmd
+                    break
                 except ArgumentTooFew:
                     # It looked like this matched the beginning, but it
                     # didn't have enough args supplied.  If we're out of
@@ -1053,23 +1076,27 @@ def validate_command(sigdict, args, verbose=False):
                         print('Not enough args supplied for ',
                               concise_sig(sig), file=sys.stderr)
                 except ArgumentError as e:
+                    ex = e
                     # Solid mismatch on an arg (type, range, etc.)
                     # Stop now, because we have the right command but
                     # some other input is invalid
-                    print("Invalid command: ", e, file=sys.stderr)
-                    print(concise_sig(sig), ': ', cmd['help'], file=sys.stderr)
-                    return {}
-            if found:
+                    found = cmd
+                    break
+            if found or ex:
                 break
 
-        if not found:
-            print('no valid command found; 10 closest matches:', file=sys.stderr)
-            for cmdsig in bestcmds[:10]:
+        if found:
+            if not valid_dict:
+                print("Invalid command:", e, file=sys.stderr)
+                print(concise_sig(sig), ': ', cmd['help'], file=sys.stderr)
+        else:
+            bestcmds = bestcmds[:10]
+            print('no valid command found; {0} closest matches:'.format(len(bestcmds)), file=sys.stderr)
+            for cmdsig in bestcmds:
                 for (cmdtag, cmd) in cmdsig.items():
                     print(concise_sig(cmd['sig']), file=sys.stderr)
-            return None
-
         return valid_dict
+
 
 
 def find_cmd_target(childargs):
@@ -1078,7 +1105,7 @@ def find_cmd_target(childargs):
     should be sent to a monitor or an osd.  We do this before even
     asking for the 'real' set of command signatures, so we can ask the
     right daemon.
-    Returns ('osd', osdid), ('pg', pgid), or ('mon', '')
+    Returns ('osd', osdid), ('pg', pgid), ('mgr', '') or ('mon', '')
     """
     sig = parse_funcsig(['tell', {'name': 'target', 'type': 'CephName'}])
     try:
@@ -1191,7 +1218,7 @@ def run_in_thread(target, *args, **kwargs):
         interrupt = True
 
     if interrupt:
-        t.retval = -errno.EINTR
+        t.retval = -errno.EINTR, None, 'Interrupted!'
     if t.exception:
         raise t.exception
     return t.retval
@@ -1256,7 +1283,7 @@ def send_command(cluster, target=('mon', ''), cmd=None, inbuf=b'', timeout=0,
             if verbose:
                 print('{0} to {1}'.format(cmd, target[0]),
                       file=sys.stderr)
-            if target[1] == '':
+            if len(target) < 2 or target[1] == '':
                 ret, outbuf, outs = run_in_thread(
                     cluster.mon_command, cmd, inbuf, timeout)
             else:
@@ -1274,9 +1301,7 @@ def send_command(cluster, target=('mon', ''), cmd=None, inbuf=b'', timeout=0,
             except ImportError:
                 raise RuntimeError("CephFS unavailable, have you installed libcephfs?")
 
-            filesystem = LibCephFS(cluster.conf_defaults, cluster.conffile)
-            filesystem.conf_parse_argv(cluster.parsed_args)
-
+            filesystem = LibCephFS(rados_inst=cluster)
             filesystem.init()
             ret, outbuf, outs = \
                 filesystem.mds_command(mds_spec, cmd, inbuf)
@@ -1307,6 +1332,8 @@ def json_command(cluster, target=('mon', ''), prefix=None, argdict=None,
         cmddict.update({'prefix': prefix})
     if argdict:
         cmddict.update(argdict)
+        if 'target' in argdict:
+            target = argdict.get('target')
 
     # grab prefix for error messages
     prefix = cmddict['prefix']

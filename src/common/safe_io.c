@@ -12,7 +12,8 @@
  *
  */
 
-#define _XOPEN_SOURCE 500
+#include "common/safe_io.h"
+#include "include/compat.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -20,9 +21,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-
-#include "common/safe_io.h"
-#include "include/compat.h"
 
 ssize_t safe_read(int fd, void *buf, size_t count)
 {

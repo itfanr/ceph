@@ -29,24 +29,26 @@ public:
   }
 
 private:
-  ~MGetPoolStatsReply() {}
+  ~MGetPoolStatsReply() override {}
 
 public:
-  const char *get_type_name() const { return "getpoolstats"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "getpoolstats"; }
+  void print(ostream& out) const override {
     out << "getpoolstatsreply(" << get_tid() << " v" << version <<  ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
     paxos_encode();
-    ::encode(fsid, payload);
-    ::encode(pool_stats, payload, features);
+    encode(fsid, payload);
+    encode(pool_stats, payload, features);
   }
-  void decode_payload() {
+  void decode_payload() override {
+    using ceph::decode;
     bufferlist::iterator p = payload.begin();
     paxos_decode(p);
-    ::decode(fsid, p);
-    ::decode(pool_stats, p);
+    decode(fsid, p);
+    decode(pool_stats, p);
   }
 };
 

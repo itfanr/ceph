@@ -2,12 +2,13 @@ ls on empty pool never containing images
 ========================================
   $ ceph osd pool create rbd_other 8
   pool 'rbd_other' created
+  $ rbd pool init rbd_other
   $ rados -p rbd rm rbd_directory >/dev/null 2>&1 || true
   $ rbd ls
   $ rbd ls --format json
-  [] (no-eol)
+  []
   $ rbd ls --format xml
-  <images></images> (no-eol)
+  <images></images>
 
 create
 =======
@@ -117,10 +118,13 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff, deep-flatten (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   $ rbd info bar --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -133,6 +137,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "bar", 
       "object_size": 4194304, 
       "objects": 256, 
+      "op_features": [], 
       "order": 22, 
       "size": 1073741824
   }
@@ -152,7 +157,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>fast-diff</feature>
       <feature>deep-flatten</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
   </image>
   $ rbd info bar@snap
   rbd image 'bar':
@@ -161,11 +168,14 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff, deep-flatten (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   \tprotected: True (esc)
   $ rbd info bar@snap --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -178,6 +188,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "bar", 
       "object_size": 4194304, 
       "objects": 128, 
+      "op_features": [], 
       "order": 22, 
       "protected": "true", 
       "size": 536870912
@@ -198,7 +209,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>fast-diff</feature>
       <feature>deep-flatten</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
     <protected>true</protected>
   </image>
   $ rbd info bar@snap2
@@ -208,11 +221,14 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff, deep-flatten (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   \tprotected: False (esc)
   $ rbd info bar@snap2 --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -225,6 +241,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "bar", 
       "object_size": 4194304, 
       "objects": 256, 
+      "op_features": [], 
       "order": 22, 
       "protected": "false", 
       "size": 1073741824
@@ -245,7 +262,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>fast-diff</feature>
       <feature>deep-flatten</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
     <protected>false</protected>
   </image>
   $ rbd info baz
@@ -255,10 +274,13 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   $ rbd info baz --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering"
       ], 
@@ -267,6 +289,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "baz", 
       "object_size": 4194304, 
       "objects": 512, 
+      "op_features": [], 
       "order": 22, 
       "size": 2147483648
   }
@@ -282,7 +305,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
     <features>
       <feature>layering</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
   </image>
   $ rbd info quux
   rbd image 'quux':
@@ -317,10 +342,13 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   $ rbd info rbd_other/child --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -332,6 +360,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "child", 
       "object_size": 4194304, 
       "objects": 128, 
+      "op_features": [], 
       "order": 22, 
       "size": 536870912
   }
@@ -350,7 +379,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>object-map</feature>
       <feature>fast-diff</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
   </image>
   $ rbd info rbd_other/child@snap
   rbd image 'child':
@@ -359,13 +390,16 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   \tprotected: False (esc)
   \tparent: rbd/bar@snap (esc)
   \toverlap: 512 MB (esc)
   $ rbd info rbd_other/child@snap --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -377,6 +411,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "child", 
       "object_size": 4194304, 
       "objects": 128, 
+      "op_features": [], 
       "order": 22, 
       "parent": {
           "image": "bar", 
@@ -402,7 +437,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>object-map</feature>
       <feature>fast-diff</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
     <protected>false</protected>
     <parent>
       <pool>rbd</pool>
@@ -418,10 +455,13 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff, deep-flatten (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   $ rbd info rbd_other/deep-flatten-child --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -434,6 +474,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "deep-flatten-child", 
       "object_size": 4194304, 
       "objects": 128, 
+      "op_features": [], 
       "order": 22, 
       "size": 536870912
   }
@@ -453,7 +494,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>fast-diff</feature>
       <feature>deep-flatten</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
   </image>
   $ rbd info rbd_other/deep-flatten-child@snap
   rbd image 'deep-flatten-child':
@@ -462,11 +505,14 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   [^^]+ (re)
   \tformat: 2 (esc)
   \tfeatures: layering, exclusive-lock, object-map, fast-diff, deep-flatten (esc)
+  \top_features:  (esc)
   \tflags:  (esc)
+  \tcreate_timestamp:* (glob)
   \tprotected: False (esc)
   $ rbd info rbd_other/deep-flatten-child@snap --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "block_name_prefix": "rbd_data.*",  (glob)
+      "create_timestamp": "*",  (glob)
       "features": [
           "layering", 
           "exclusive-lock", 
@@ -479,6 +525,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       "name": "deep-flatten-child", 
       "object_size": 4194304, 
       "objects": 128, 
+      "op_features": [], 
       "order": 22, 
       "protected": "false", 
       "size": 536870912
@@ -499,7 +546,9 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <feature>fast-diff</feature>
       <feature>deep-flatten</feature>
     </features>
+    <op_features></op_features>
     <flags></flags>
+    <create_timestamp>*</create_timestamp> (glob)
     <protected>false</protected>
   </image>
   $ rbd list
@@ -525,15 +574,15 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
     <name>quuy</name>
   </images>
   $ rbd list -l
-  NAME       SIZE PARENT FMT PROT LOCK 
-  foo       1024M          1           
-  foo@snap  1024M          1           
-  quux      1024k          1      excl 
-  bar       1024M          2           
-  bar@snap   512M          2 yes       
-  bar@snap2 1024M          2           
-  baz       2048M          2      shr  
-  quuy      2048M          2           
+  NAME      SIZE PARENT FMT PROT LOCK 
+  foo         1G          1           
+  foo@snap    1G          1           
+  quux        1M          1      excl 
+  bar         1G          2           
+  bar@snap  512M          2 yes       
+  bar@snap2   1G          2           
+  baz         2G          2      shr  
+  quuy        2G          2           
   $ rbd list -l --format json | python -mjson.tool | sed 's/,$/, /'
   [
       {
@@ -721,7 +770,7 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   </images>
   $ rbd lock list foo
   $ rbd lock list foo --format json | python -mjson.tool | sed 's/,$/, /'
-  {}
+  []
   $ rbd lock list foo --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
   <locks></locks>
   $ rbd lock list quux
@@ -729,18 +778,20 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   Locker*ID*Address* (glob)
   client.* id * (glob)
   $ rbd lock list quux --format json | python -mjson.tool | sed 's/,$/, /'
-  {
-      "id": {
+  [
+      {
           "address": "*",  (glob)
+          "id": "id", 
           "locker": "client.*" (glob)
       }
-  }
+  ]
   $ rbd lock list quux --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
   <locks>
-    <id>
+    <lock>
+      <id>id</id>
       <locker>client.*</locker> (glob)
       <address>*</address> (glob)
-    </id>
+    </lock>
   </locks>
   $ rbd lock list baz
   There are 3 shared locks on this image.
@@ -750,44 +801,51 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   client.*id[123].* (re)
   client.*id[123].* (re)
   $ rbd lock list baz --format json | python -mjson.tool | sed 's/,$/, /'
-  {
-      "id1": {
+  [
+      {
           "address": "*",  (glob)
+          "id": "id*",  (glob)
           "locker": "client.*" (glob)
       }, 
-      "id2": {
+      {
           "address": "*",  (glob)
+          "id": "id*",  (glob)
           "locker": "client.*" (glob)
       }, 
-      "id3": {
+      {
           "address": "*",  (glob)
+          "id": "id*",  (glob)
           "locker": "client.*" (glob)
       }
-  }
+  ]
   $ rbd lock list baz --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
   <locks>
-    <id*> (glob)
+    <lock>
+      <id>id*</id> (glob)
       <locker>client.*</locker> (glob)
       <address>*</address> (glob)
-    </id*> (glob)
-    <id*> (glob)
+    </lock>
+    <lock>
+      <id>id*</id> (glob)
       <locker>client.*</locker> (glob)
       <address>*</address> (glob)
-    </id*> (glob)
-    <id*> (glob)
+    </lock>
+    <lock>
+      <id>id*</id> (glob)
       <locker>client.*</locker> (glob)
       <address>*</address> (glob)
-    </id*> (glob)
+    </lock>
   </locks>
   $ rbd snap list foo
-  SNAPID NAME    SIZE 
+  SNAPID NAME    SIZE TIMESTAMP 
       *snap*1024*MB* (glob)
   $ rbd snap list foo --format json | python -mjson.tool | sed 's/,$/, /'
   [
       {
           "id": *,  (glob)
           "name": "snap", 
-          "size": 1073741824
+          "size": 1073741824, 
+          "timestamp": ""
       }
   ]
   $ rbd snap list foo --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
@@ -796,10 +854,11 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <id>*</id> (glob)
       <name>snap</name>
       <size>1073741824</size>
+      <timestamp></timestamp>
     </snapshot>
   </snapshots>
   $ rbd snap list bar
-  SNAPID NAME     SIZE 
+  SNAPID NAME     SIZE TIMESTAMP                
       *snap*512*MB* (glob)
       *snap2*1024*MB* (glob)
   $ rbd snap list bar --format json | python -mjson.tool | sed 's/,$/, /'
@@ -807,12 +866,14 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       {
           "id": *,  (glob)
           "name": "snap", 
-          "size": 536870912
+          "size": 536870912, 
+          "timestamp": * (glob)
       }, 
       {
           "id": *,  (glob)
           "name": "snap2", 
-          "size": 1073741824
+          "size": 1073741824, 
+          "timestamp": * (glob)
       }
   ]
   $ rbd snap list bar --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
@@ -821,11 +882,13 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <id>*</id> (glob)
       <name>snap</name>
       <size>536870912</size>
+      <timestamp>*</timestamp> (glob)
     </snapshot>
     <snapshot>
       <id>*</id> (glob)
       <name>snap2</name>
       <size>1073741824</size>
+      <timestamp>*</timestamp> (glob)
     </snapshot>
   </snapshots>
   $ rbd snap list baz
@@ -834,14 +897,15 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
   $ rbd snap list baz --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
   <snapshots></snapshots>
   $ rbd snap list rbd_other/child
-  SNAPID NAME   SIZE 
+  SNAPID NAME   SIZE TIMESTAMP                
       *snap*512*MB* (glob)
   $ rbd snap list rbd_other/child --format json | python -mjson.tool | sed 's/,$/, /'
   [
       {
           "id": *,  (glob)
           "name": "snap", 
-          "size": 536870912
+          "size": 536870912, 
+          "timestamp": * (glob)
       }
   ]
   $ rbd snap list rbd_other/child --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
@@ -850,15 +914,16 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
       <id>*</id> (glob)
       <name>snap</name>
       <size>536870912</size>
+      <timestamp>*</timestamp> (glob)
     </snapshot>
   </snapshots>
-  $ rbd disk-usage --pool rbd_other
-  NAME                    PROVISIONED  USED 
-  child@snap                     512M  512M 
-  child                          512M  512M 
-  deep-flatten-child@snap        512M  512M 
-  deep-flatten-child             512M  512M 
-  <TOTAL>                       1024M 2048M 
+  $ rbd disk-usage --pool rbd_other 2>/dev/null
+  NAME                    PROVISIONED USED 
+  child@snap                     512M    0 
+  child                          512M   4M 
+  deep-flatten-child@snap        512M    0 
+  deep-flatten-child             512M    0 
+  <TOTAL>                          1G   4M 
   $ rbd disk-usage --pool rbd_other --format json | python -mjson.tool | sed 's/,$/, /'
   {
       "images": [
@@ -866,27 +931,27 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
               "name": "child", 
               "provisioned_size": 536870912, 
               "snapshot": "snap", 
-              "used_size": 536870912
+              "used_size": 0
           }, 
           {
               "name": "child", 
               "provisioned_size": 536870912, 
-              "used_size": 536870912
+              "used_size": 4194304
           }, 
           {
               "name": "deep-flatten-child", 
               "provisioned_size": 536870912, 
               "snapshot": "snap", 
-              "used_size": 536870912
+              "used_size": 0
           }, 
           {
               "name": "deep-flatten-child", 
               "provisioned_size": 536870912, 
-              "used_size": 536870912
+              "used_size": 0
           }
       ], 
       "total_provisioned_size": 1073741824, 
-      "total_used_size": 2147483648
+      "total_used_size": 4194304
   }
   $ rbd disk-usage --pool rbd_other --format xml | xml_pp 2>&1 | grep -v '^new version at /usr/bin/xml_pp'
   <stats>
@@ -895,27 +960,27 @@ whenever it is run. grep -v to ignore it, but still work on other distros.
         <name>child</name>
         <snapshot>snap</snapshot>
         <provisioned_size>536870912</provisioned_size>
-        <used_size>536870912</used_size>
+        <used_size>0</used_size>
       </image>
       <image>
         <name>child</name>
         <provisioned_size>536870912</provisioned_size>
-        <used_size>536870912</used_size>
+        <used_size>4194304</used_size>
       </image>
       <image>
         <name>deep-flatten-child</name>
         <snapshot>snap</snapshot>
         <provisioned_size>536870912</provisioned_size>
-        <used_size>536870912</used_size>
+        <used_size>0</used_size>
       </image>
       <image>
         <name>deep-flatten-child</name>
         <provisioned_size>536870912</provisioned_size>
-        <used_size>536870912</used_size>
+        <used_size>0</used_size>
       </image>
     </images>
     <total_provisioned_size>1073741824</total_provisioned_size>
-    <total_used_size>2147483648</total_used_size>
+    <total_used_size>4194304</total_used_size>
   </stats>
 
 # cleanup

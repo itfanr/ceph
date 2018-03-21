@@ -13,19 +13,6 @@
 #include <climits>
 
 
-cls_handle_t h_class;
-cls_method_handle_t h_get_idata_from_key;
-cls_method_handle_t h_get_next_idata;
-cls_method_handle_t h_get_prev_idata;
-cls_method_handle_t h_read_many;
-cls_method_handle_t h_check_writable;
-cls_method_handle_t h_assert_size_in_bound;
-cls_method_handle_t h_omap_insert;
-cls_method_handle_t h_create_with_omap;
-cls_method_handle_t h_omap_remove;
-cls_method_handle_t h_maybe_read_for_balance;
-
-
 /**
  * finds the index_data where a key belongs.
  *
@@ -43,7 +30,9 @@ static int get_idata_from_key(cls_method_context_t hctx, const string &key,
   int r = 0;
   std::map<std::string, bufferlist> kvmap;
 
-  r = cls_cxx_map_get_vals(hctx, key_data(key).encoded(), "", 2, &kvmap);
+  bool more;
+
+  r = cls_cxx_map_get_vals(hctx, key_data(key).encoded(), "", 2, &kvmap, &more);
   if (r < 0) {
     CLS_LOG(20, "error reading index for range %s: %d", key.c_str(), r);
     return r;
@@ -83,7 +72,7 @@ static int get_idata_from_key_op(cls_method_context_t hctx,
   idata_from_key_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     CLS_LOG(20, "error decoding idata_from_key_args.");
     return -EINVAL;
@@ -92,7 +81,7 @@ static int get_idata_from_key_op(cls_method_context_t hctx,
   if (r < 0) {
     return r;
   } else {
-    ::encode(op, *out);
+    encode(op, *out);
     return 0;
   }
 }
@@ -112,7 +101,8 @@ static int get_next_idata(cls_method_context_t hctx, const index_data &idata,
     index_data &out_data) {
   int r = 0;
   std::map<std::string, bufferlist> kvs;
-  r = cls_cxx_map_get_vals(hctx, idata.kdata.encoded(), "", 1, &kvs);
+  bool more;
+  r = cls_cxx_map_get_vals(hctx, idata.kdata.encoded(), "", 1, &kvs, &more);
   if (r < 0){
     CLS_LOG(20, "getting kvs failed with error %d", r);
     return r;
@@ -135,7 +125,7 @@ static int get_next_idata_op(cls_method_context_t hctx,
   idata_from_idata_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -163,7 +153,8 @@ static int get_prev_idata(cls_method_context_t hctx, const index_data &idata,
     index_data &out_data) {
   int r = 0;
   std::map<std::string, bufferlist> kvs;
-  r = cls_cxx_map_get_vals(hctx, "", "", LONG_MAX, &kvs);
+  bool more;
+  r = cls_cxx_map_get_vals(hctx, "", "", LONG_MAX, &kvs, &more);
   if (r < 0){
     CLS_LOG(20, "getting kvs failed with error %d", r);
     return r;
@@ -196,7 +187,7 @@ static int get_prev_idata_op(cls_method_context_t hctx,
   idata_from_idata_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -215,10 +206,11 @@ static int get_prev_idata_op(cls_method_context_t hctx,
 static int read_many(cls_method_context_t hctx, const set<string> &keys,
     map<string, bufferlist> * out) {
   int r = 0;
+  bool more;
   CLS_ERR("reading from a map of size %d, first key encoded is %s",
       (int)keys.size(), key_data(*keys.begin()).encoded().c_str());
   r = cls_cxx_map_get_vals(hctx, key_data(*keys.begin()).encoded().c_str(),
-      "", LONG_MAX, out);
+      "", LONG_MAX, out, &more);
   if (r < 0) {
     CLS_ERR("getting omap vals failed with error %d", r);
   }
@@ -239,7 +231,7 @@ static int read_many_op(cls_method_context_t hctx, bufferlist *in,
   map<string, bufferlist> outmap;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error & err) {
     return -EINVAL;
   }
@@ -326,7 +318,7 @@ static int assert_size_in_bound_op(cls_method_context_t hctx,
   assert_size_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -422,7 +414,7 @@ static int omap_insert_op(cls_method_context_t hctx,
   omap_set_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -476,7 +468,7 @@ static int create_with_omap_op(cls_method_context_t hctx,
   map<string, bufferlist> omap;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(omap, it);
+    decode(omap, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -567,7 +559,7 @@ static int omap_remove_op(cls_method_context_t hctx,
   omap_rm_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -612,7 +604,8 @@ static int maybe_read_for_balance(cls_method_context_t hctx,
   }
 
   //if the assert succeeded, it needs to be balanced
-  r = cls_cxx_map_get_vals(hctx, "", "", LONG_MAX, &odata.omap);
+  bool more;
+  r = cls_cxx_map_get_vals(hctx, "", "", LONG_MAX, &odata.omap, &more);
   if (r < 0){
     CLS_LOG(20, "rebalance read: getting kvs failed with error %d", r);
     return r;
@@ -630,7 +623,7 @@ static int maybe_read_for_balance_op(cls_method_context_t hctx,
   rebalance_args op;
   bufferlist::iterator it = in->begin();
   try {
-    ::decode(op, it);
+    decode(op, it);
   } catch (buffer::error& err) {
     return -EINVAL;
   }
@@ -644,9 +637,21 @@ static int maybe_read_for_balance_op(cls_method_context_t hctx,
 }
 
 
-void __cls_init()
+CLS_INIT(kvs)
 {
   CLS_LOG(20, "Loaded assert condition class!");
+
+  cls_handle_t h_class;
+  cls_method_handle_t h_get_idata_from_key;
+  cls_method_handle_t h_get_next_idata;
+  cls_method_handle_t h_get_prev_idata;
+  cls_method_handle_t h_read_many;
+  cls_method_handle_t h_check_writable;
+  cls_method_handle_t h_assert_size_in_bound;
+  cls_method_handle_t h_omap_insert;
+  cls_method_handle_t h_create_with_omap;
+  cls_method_handle_t h_omap_remove;
+  cls_method_handle_t h_maybe_read_for_balance;
 
   cls_register("kvs", &h_class);
   cls_register_cxx_method(h_class, "get_idata_from_key",

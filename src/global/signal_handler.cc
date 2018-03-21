@@ -31,6 +31,8 @@
 extern char *sys_siglist[]; 
 #endif 
 
+#define dout_context g_ceph_context
+
 void install_sighandler(int signum, signal_handler_t handler, int flags)
 {
   int ret;
@@ -109,17 +111,19 @@ static void handle_fatal_signal(int signum)
   dout_emergency(buf);
   pidfile_remove();
 
+  // TODO: don't use an ostringstream here. It could call malloc(), which we
+  // don't want inside a signal handler.
+  // Also fix the backtrace code not to allocate memory.
+  BackTrace bt(0);
+  ostringstream oss;
+  bt.print(oss);
+  dout_emergency(oss.str());
+
   // avoid recursion back into logging code if that is where
   // we got the SEGV.
-  if (!g_ceph_context->_log->is_inside_log_lock()) {
-    // TODO: don't use an ostringstream here. It could call malloc(), which we
-    // don't want inside a signal handler.
-    // Also fix the backtrace code not to allocate memory.
-    BackTrace bt(0);
-    ostringstream oss;
-    bt.print(oss);
-    dout_emergency(oss.str());
-
+  if (g_ceph_context &&
+      g_ceph_context->_log &&
+      !g_ceph_context->_log->is_inside_log_lock()) {
     // dump to log.  this uses the heap extensively, but we're better
     // off trying than not.
     derr << buf << std::endl;
@@ -153,10 +157,26 @@ void install_standard_sighandlers(void)
 #include "common/Thread.h"
 #include <errno.h>
 
+#ifdef __APPLE__
+#include <libproc.h>
+
+string get_name_by_pid(pid_t pid)
+{
+  char buf[PROC_PIDPATHINFO_MAXSIZE];
+  int ret = proc_pidpath(pid, buf, sizeof(buf));
+  if (ret == 0) {
+    derr << "Fail to proc_pidpath(" << pid << ")"
+	 << " error = " << cpp_strerror(ret)
+	 << dendl;
+    return "<unknown>";
+  }
+  return string(buf, ret);
+}
+#else
 string get_name_by_pid(pid_t pid)
 {
   char proc_pid_path[PATH_MAX] = {0};
-  snprintf(proc_pid_path, PATH_MAX, "/proc/%d/cmdline", pid);
+  snprintf(proc_pid_path, PATH_MAX, PROCPREFIX "/proc/%d/cmdline", pid);
   int fd = open(proc_pid_path, O_RDONLY);
 
   if (fd < 0) {
@@ -181,7 +201,7 @@ string get_name_by_pid(pid_t pid)
   std::replace(buf, buf + ret, '\0', ' ');
   return string(buf, ret);
 }
-
+#endif
  
 /**
  * safe async signal handler / dispatcher
@@ -236,7 +256,7 @@ struct SignalHandler : public Thread {
     create("signal_handler");
   }
 
-  ~SignalHandler() {
+  ~SignalHandler() override {
     shutdown();
   }
 
@@ -252,7 +272,7 @@ struct SignalHandler : public Thread {
   }
 
   // thread entry point
-  void *entry() {
+  void *entry() override {
     while (!stop) {
       // build fd list
       struct pollfd fds[33];
@@ -281,7 +301,7 @@ struct SignalHandler : public Thread {
 	char v;
 
 	// consume byte from signal socket, if any.
-	r = read(pipefd[0], &v, 1);
+	TEMP_FAILURE_RETRY(read(pipefd[0], &v, 1));
 
 	lock.Lock();
 	for (unsigned signum=0; signum<32; signum++) {

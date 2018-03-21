@@ -52,6 +52,7 @@ enum {
   LOCK_PREXLOCK,    // A    . . .. . . / . .   (lock)
   LOCK_XLOCK,       // A    . . .. . . / . .   (lock)
   LOCK_XLOCKDONE,   // A    r p rd l x / . .   (lock)  <-- by same client only!!
+  LOCK_XLOCKSNAP,   // also revoke Fb
   LOCK_LOCK_XLOCK,
 
   LOCK_SYNC_LOCK,    // AR   R . .. . . / . .   R .. . . / . .
@@ -93,6 +94,8 @@ enum {
   LOCK_XSYN_EXCL,
   LOCK_EXCL_XSYN,
   LOCK_XSYN_SYNC,
+  LOCK_XSYN_LOCK,
+  LOCK_XSYN_MIX,
 
   LOCK_MAX,
 };

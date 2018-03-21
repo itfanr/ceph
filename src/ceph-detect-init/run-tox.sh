@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Copyright (C) 2015 SUSE LINUX GmbH
 # Copyright (C) 2016 <contact@redhat.com>
@@ -16,11 +16,6 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU Library Public License for more details.
 #
-
-if [ x"`uname`"x = xFreeBSDx ]; then
-    echo FreeBSD init system has not been integrated.
-    exit 0
-fi
 
 # run from the ceph-detect-init directory or from its parent
 : ${CEPH_DETECT_INIT_VIRTUALENV:=/tmp/ceph-detect-init-virtualenv}

@@ -53,10 +53,9 @@ int main(int argc, const char **argv)
 	cout << "Xio Server starting..." << endl;
 
 	argv_to_vec(argc, argv, args);
-	env_to_vec(args);
 
 	global_init(NULL, args, CEPH_ENTITY_TYPE_ANY, CODE_ENVIRONMENT_DAEMON,
-		    0);
+		    CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
 
 	for (arg_iter = args.begin(); arg_iter != args.end();) {
 	  if (ceph_argparse_witharg(args, arg_iter, &val, "--addr",
@@ -88,7 +87,8 @@ int main(int argc, const char **argv)
 	messenger = new XioMessenger(g_ceph_context,
 				     entity_name_t::MON(-1),
 				     "xio_server",
-				     0 /* nonce */, XIO_ALL_FEATURES, 0 /* cflags */,
+				     0 /* nonce */,
+				     0 /* cflags */,
 				     dstrategy);
 
 	static_cast<XioMessenger*>(messenger)->set_magic(
@@ -96,7 +96,7 @@ int main(int argc, const char **argv)
 	  MSG_MAGIC_TRACE_CTR /* timing prints */);
 
 	messenger->set_default_policy(
-	  Messenger::Policy::stateless_server(CEPH_FEATURES_ALL, 0));
+	  Messenger::Policy::stateless_server(0));
 
 	r = messenger->bind(bind_addr);
 	if (r < 0)

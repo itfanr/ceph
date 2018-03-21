@@ -15,10 +15,6 @@
 CLS_VER(1,0)
 CLS_NAME(lua)
 
-cls_handle_t h_class;
-cls_method_handle_t h_eval_json;
-cls_method_handle_t h_eval_bufferlist;
-
 /*
  * Jump point for recovering from Lua panic.
  */
@@ -246,7 +242,7 @@ static int clslua_opresult(lua_State *L, int ok, int ret, int nargs,
   assert(err);
   if (err->error) {
     CLS_ERR("error: cls_lua state machine: unexpected error");
-    assert(0);
+    ceph_abort();
   }
 
   /* everything is cherry */
@@ -433,7 +429,8 @@ static int clslua_map_get_keys(lua_State *L)
   int max_to_get = luaL_checkinteger(L, 2);
 
   std::set<string> keys;
-  int ret = cls_cxx_map_get_keys(hctx, start_after, max_to_get, &keys);
+  bool more;
+  int ret = cls_cxx_map_get_keys(hctx, start_after, max_to_get, &keys, &more);
   if (ret < 0)
     return clslua_opresult(L, 0, ret, 0);
 
@@ -460,8 +457,9 @@ static int clslua_map_get_vals(lua_State *L)
   int max_to_get = luaL_checkinteger(L, 3);
 
   map<string, bufferlist> kvpairs;
+  bool more;
   int ret = cls_cxx_map_get_vals(hctx, start_after, filter_prefix,
-      max_to_get, &kvpairs);
+      max_to_get, &kvpairs, &more);
   if (ret < 0)
     return clslua_opresult(L, 0, ret, 0);
 
@@ -509,8 +507,7 @@ static int clslua_map_set_vals(lua_State *L)
 
   map<string, bufferlist> kvpairs;
 
-  lua_pushnil(L);
-  while (lua_next(L, 1) != 0) {
+  for (lua_pushnil(L); lua_next(L, 1); lua_pop(L, 1)) {
     /*
      * In the case of a numeric key a copy is made on the stack because
      * converting to a string would otherwise manipulate the original key and
@@ -553,8 +550,6 @@ static int clslua_map_set_vals(lua_State *L)
     }
 
     kvpairs[key] = val;
-
-    lua_pop(L, 1);
   }
 
   int ret = cls_cxx_map_set_vals(hctx, &kvpairs);
@@ -648,7 +643,7 @@ static const luaL_Reg clslua_lib[] = {
 };
 
 /*
- * Set int const in table at top of stack
+ * Set const int in table at top of stack
  */
 #define SET_INT_CONST(var) do { \
   lua_pushinteger(L, var); \
@@ -871,7 +866,7 @@ static int clslua_eval(lua_State *L)
 
         try {
           bufferlist::iterator it = ctx->inbl->begin();
-          ::decode(op, it);
+          decode(op, it);
         } catch (const buffer::error &err) {
           CLS_ERR("error: could not decode ceph encoded input");
           ctx->ret = -EINVAL;
@@ -887,7 +882,7 @@ static int clslua_eval(lua_State *L)
     default:
       CLS_ERR("error: unknown encoding type");
       ctx->ret = -EFAULT;
-      assert(0);
+      ceph_abort();
       return 0;
   }
 
@@ -992,7 +987,7 @@ static int eval_generic(cls_method_context_t hctx, bufferlist *in, bufferlist *o
       struct clslua_err *err = clslua_checkerr(L);
       if (!err) {
         CLS_ERR("error: cls_lua state machine: unexpected error");
-        assert(0);
+        ceph_abort();
       }
 
       /* Error origin a cls_cxx_* method? */
@@ -1039,9 +1034,13 @@ static int eval_bufferlist(cls_method_context_t hctx, bufferlist *in, bufferlist
   return eval_generic(hctx, in, out, BUFFERLIST_ENC);
 }
 
-void __cls_init()
+CLS_INIT(lua)
 {
   CLS_LOG(20, "Loaded lua class!");
+
+  cls_handle_t h_class;
+  cls_method_handle_t h_eval_json;
+  cls_method_handle_t h_eval_bufferlist;
 
   cls_register("lua", &h_class);
 

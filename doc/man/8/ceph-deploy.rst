@@ -15,11 +15,7 @@ Synopsis
 
 | **ceph-deploy** **mon** *create-initial*
 
-| **ceph-deploy** **osd** *prepare* [*ceph-node*]:[*dir-path*]
-
-| **ceph-deploy** **osd** *activate* [*ceph-node*]:[*dir-path*]
-
-| **ceph-deploy** **osd** *create* [*ceph-node*]:[*dir-path*]
+| **ceph-deploy** **osd** *create* *--data* *device* *ceph-node*
 
 | **ceph-deploy** **admin** [*admin-node*][*ceph-node*...]
 
@@ -251,46 +247,12 @@ Subcommand ``list`` lists disk partitions and Ceph OSDs.
 
 Usage::
 
-	ceph-deploy disk list [HOST:[DISK]]
+	ceph-deploy disk list HOST
 
-Here, [HOST] is hostname of the node and [DISK] is disk name or path.
 
-Subcommand ``prepare`` prepares a directory, disk or drive for a Ceph OSD. It
-creates a GPT partition, marks the partition with Ceph type uuid, creates a
-file system, marks the file system as ready for Ceph consumption, uses entire
-partition and adds a new partition to the journal disk.
-
-Usage::
-
-	ceph-deploy disk prepare [HOST:[DISK]]
-
-Here, [HOST] is hostname of the node and [DISK] is disk name or path.
-
-Subcommand ``activate`` activates the Ceph OSD. It mounts the volume in a
-temporary location, allocates an OSD id (if needed), remounts in the correct
-location ``/var/lib/ceph/osd/$cluster-$id`` and starts ``ceph-osd``. It is
-triggered by ``udev`` when it sees the OSD GPT partition type or on ceph service
-start with ``ceph disk activate-all``.
-
-Usage::
-
-	ceph-deploy disk activate [HOST:[DISK]]
-
-Here, [HOST] is hostname of the node and [DISK] is disk name or path.
-
-Subcommand ``zap`` zaps/erases/destroys a device's partition table and contents.
-It actually uses ``sgdisk`` and it's option ``--zap-all`` to destroy both GPT and
-MBR data structures so that the disk becomes suitable for repartitioning.
-``sgdisk`` then uses ``--mbrtogpt`` to convert the MBR or BSD disklabel disk to a
-GPT disk. The ``prepare`` subcommand can now be executed which will create a new
-GPT partition.
-
-Usage::
-
-	ceph-deploy disk zap [HOST:[DISK]]
-
-Here, [HOST] is hostname of the node and [DISK] is disk name or path.
-
+Subcommand ``zap`` zaps/erases/destroys a device's partition table and
+contents.  It actually uses ``ceph-volume lvm zap`` remotely, alternatively
+allowing someone to remove the Ceph metadata from the logical volume.
 
 osd
 ---
@@ -298,46 +260,35 @@ osd
 Manage OSDs by preparing data disk on remote host. ``osd`` makes use of certain
 subcommands for managing OSDs.
 
-Subcommand ``prepare`` prepares a directory, disk or drive for a Ceph OSD. It
-first checks against multiple OSDs getting created and warns about the
-possibility of more than the recommended which would cause issues with max
-allowed PIDs in a system. It then reads the bootstrap-osd key for the cluster or
-writes the bootstrap key if not found. It then uses :program:`ceph-disk`
-utility's ``prepare`` subcommand to prepare the disk, journal and deploy the OSD
-on the desired host. Once prepared, it gives some time to the OSD to settle and
-checks for any possible errors and if found, reports to the user.
+Subcommand ``create`` prepares a device for Ceph OSD. It first checks against
+multiple OSDs getting created and warns about the possibility of more than the
+recommended which would cause issues with max allowed PIDs in a system. It then
+reads the bootstrap-osd key for the cluster or writes the bootstrap key if not
+found.
+It then uses :program:`ceph-volume` utility's ``lvm create`` subcommand to
+prepare the disk, (and journal if using filestore) and deploy the OSD on the desired host.
+Once prepared, it gives some time to the OSD to start and checks for any
+possible errors and if found, reports to the user.
+
+Bluestore Usage::
+
+	ceph-deploy osd create --data DISK HOST
+
+Filestore Usage::
+
+	ceph-deploy osd create --data DISK --journal JOURNAL HOST
+
+
+.. note:: For other flags available, please see the man page or the --help menu
+          on ceph-deploy osd create
+
+Subcommand ``list`` lists devices associated to Ceph as part of an OSD.
+It uses the ``ceph-volume lvm list`` output that has a rich output, mapping
+OSDs to devices and other interesting information about the OSD setup.
 
 Usage::
 
-	ceph-deploy osd prepare HOST:DISK[:JOURNAL] [HOST:DISK[:JOURNAL]...]
-
-Subcommand ``activate`` activates the OSD prepared using ``prepare`` subcommand.
-It actually uses :program:`ceph-disk` utility's ``activate`` subcommand with
-appropriate init type based on distro to activate the OSD. Once activated, it
-gives some time to the OSD to start and checks for any possible errors and if
-found, reports to the user. It checks the status of the prepared OSD, checks the
-OSD tree and makes sure the OSDs are up and in.
-
-Usage::
-
-	ceph-deploy osd activate HOST:DISK[:JOURNAL] [HOST:DISK[:JOURNAL]...]
-
-Subcommand ``create`` uses ``prepare`` and ``activate`` subcommands to create an
-OSD.
-
-Usage::
-
-	ceph-deploy osd create HOST:DISK[:JOURNAL] [HOST:DISK[:JOURNAL]...]
-
-Subcommand ``list`` lists disk partitions, Ceph OSDs and prints OSD metadata.
-It gets the osd tree from a monitor host, uses the ``ceph-disk-list`` output
-and gets the mount point by matching the line where the partition mentions
-the OSD name, reads metadata from files, checks if a journal path exists,
-if the OSD is in a OSD tree and prints the OSD metadata.
-
-Usage::
-
-	ceph-deploy osd list HOST:DISK[:JOURNAL] [HOST:DISK[:JOURNAL]...]
+	ceph-deploy osd list HOST
 
 
 admin
@@ -484,89 +435,29 @@ Another option :option:`--master` can also be used with this command.
 Options
 =======
 
-.. option:: --version
+.. option:: --address
 
-	The current installed version of :program:`ceph-deploy`.
-
-.. option:: --username
-
-	The username to connect to the remote host.
-
-.. option:: --overwrite-conf
-
-	Overwrite an existing conf file on remote host (if present).
-
-.. option:: --cluster
-
-	Name of the cluster.
-
-.. option:: --ceph-conf
-
-	Use (or reuse) a given ``ceph.conf`` file.
-
-.. option:: --no-ssh-copykey
-
-	Do not attempt to copy ssh keys.
-
-.. option:: --fsid
-
-	Provide an alternate FSID for ``ceph.conf`` generation.
-
-.. option:: --cluster-network
-
-	Specify the (internal) cluster network.
-
-.. option:: --public-network
-
-	Specify the public network for a cluster.
-
-.. option:: --testing
-
-	Install the latest development release.
-
-.. option:: --dev
-
-	Install a bleeding edge built from Git branch or tag (default: master).
+	IP address of the host node to be added to the cluster.
 
 .. option:: --adjust-repos
 
 	Install packages modifying source repos.
 
-.. option:: --no-adjust-repos
+.. option:: --ceph-conf
 
-	Install packages without modifying source repos.
+	Use (or reuse) a given ``ceph.conf`` file.
 
-.. option:: --repo
+.. option:: --cluster
 
-	Install repo files only (skips package installation).
+	Name of the cluster.
 
-.. option:: --local-mirror
+.. option:: --dev
 
-	Fetch packages and push them to hosts for a local repo mirror.
+	Install a bleeding edge built from Git branch or tag (default: master).
 
-.. option:: --repo-url
+.. option:: --cluster-network
 
-	Specify a repo url that mirrors/contains Ceph packages.
-
-.. option:: --gpg-url
-
-	Specify a GPG key url to be used with custom repos (defaults to ceph.com).
-
-.. option:: --address
-
-	IP address of the host node to be added to the cluster.
-
-.. option:: --keyrings
-
-	Concatenate multiple keyrings to be seeded on new monitors.
-
-.. option:: --zap-disk
-
-	Destroy the partition table and content of a disk.
-
-.. option:: --fs-type
-
-	Filesystem to use to format disk (e.g., ``xfs``, ``btrfs``).
+	Specify the (internal) cluster network.
 
 .. option:: --dmcrypt
 
@@ -580,20 +471,84 @@ Options
 
 	Comma-separated package(s) to install on remote hosts.
 
-.. option:: --remove
+.. option:: --fs-type
 
-	Comma-separated package(s) to remove from remote hosts.
+	Filesystem to use to format disk ``(xfs, btrfs or ext4)``.  Note that support for btrfs and ext4 is no longer tested or recommended; please use xfs.
+
+.. option:: --fsid
+
+	Provide an alternate FSID for ``ceph.conf`` generation.
+
+.. option:: --gpg-url
+
+	Specify a GPG key url to be used with custom repos (defaults to ceph.com).
+
+.. option:: --keyrings
+
+	Concatenate multiple keyrings to be seeded on new monitors.
+
+.. option:: --local-mirror
+
+	Fetch packages and push them to hosts for a local repo mirror.
 
 .. option:: --master
 
 	The domain for the Calamari master server.
+
+.. option:: --mkfs
+
+	Inject keys to MONs on remote nodes.
+
+.. option:: --no-adjust-repos
+
+	Install packages without modifying source repos.
+
+.. option:: --no-ssh-copykey
+
+	Do not attempt to copy ssh keys.
+
+.. option:: --overwrite-conf
+
+	Overwrite an existing conf file on remote host (if present).
+
+.. option:: --public-network
+
+	Specify the public network for a cluster.
+
+.. option:: --remove
+
+	Comma-separated package(s) to remove from remote hosts.
+
+.. option:: --repo
+
+	Install repo files only (skips package installation).
+
+.. option:: --repo-url
+
+	Specify a repo url that mirrors/contains Ceph packages.
+
+.. option:: --testing
+
+	Install the latest development release.
+
+.. option:: --username
+
+	The username to connect to the remote host.
+
+.. option:: --version
+
+	The current installed version of :program:`ceph-deploy`.
+
+.. option:: --zap-disk
+
+	Destroy the partition table and content of a disk.
 
 
 Availability
 ============
 
 :program:`ceph-deploy` is part of Ceph, a massively scalable, open-source, distributed storage system. Please refer to
-the documentation at http://ceph.com/ceph-deploy/docs for more information.
+the documentation at https://ceph.com/ceph-deploy/docs for more information.
 
 
 See also

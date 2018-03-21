@@ -42,8 +42,9 @@ private:
 public:
   UserPerm() : m_uid(-1), m_gid(-1), gid_count(0),
 	       gids(NULL), alloced_gids(false) {}
-  UserPerm(int uid, int gid) : m_uid(uid), m_gid(gid), gid_count(0),
-			       gids(NULL), alloced_gids(false) {}
+  UserPerm(uid_t uid, gid_t gid, int ngids=0, gid_t *gidlist=NULL) :
+	    m_uid(uid), m_gid(gid), gid_count(ngids),
+	    gids(gidlist), alloced_gids(false) {}
   UserPerm(const UserPerm& o) : UserPerm() {
     deep_copy_from(o);
   }
@@ -65,12 +66,12 @@ public:
     return *this;
   }
 
-  uid_t uid() const { return m_uid; }
-  gid_t gid() const { return m_gid; }
-  bool gid_in_groups(gid_t gid) const {
-    if (gid == m_gid) return true;
+  uid_t uid() const { return m_uid != (uid_t)-1 ? m_uid : ::geteuid(); }
+  gid_t gid() const { return m_gid != (gid_t)-1 ? m_gid : ::getegid(); }
+  bool gid_in_groups(gid_t id) const {
+    if (id == gid()) return true;
     for (int i = 0; i < gid_count; ++i) {
-      if (gid == gids[i]) return true;
+      if (id == gids[i]) return true;
     }
     return false;
   }

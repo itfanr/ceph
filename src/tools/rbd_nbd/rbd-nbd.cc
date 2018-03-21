@@ -26,60 +26,121 @@
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <assert.h>
 
 #include <linux/nbd.h>
 #include <linux/fs.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
+#include <fstream>
 #include <iostream>
-#include <boost/regex.hpp>
+#include <memory>
+#include <regex>
+#include <boost/algorithm/string/predicate.hpp>
 
-#include "mon/MonClient.h"
+#include "common/Formatter.h"
+#include "common/Preforker.h"
+#include "common/TextTable.h"
+#include "common/ceph_argparse.h"
 #include "common/config.h"
 #include "common/dout.h"
-
 #include "common/errno.h"
 #include "common/module.h"
 #include "common/safe_io.h"
-#include "common/ceph_argparse.h"
-#include "common/Preforker.h"
+#include "common/version.h"
+
 #include "global/global_init.h"
+#include "global/signal_handler.h"
 
 #include "include/rados/librados.hpp"
 #include "include/rbd/librbd.hpp"
+#include "include/stringify.h"
 #include "include/xlist.h"
 
+#include "mon/MonClient.h"
+
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
 #define dout_prefix *_dout << "rbd-nbd: "
 
+struct Config {
+  int nbds_max = 0;
+  int max_part = 255;
+  int timeout = -1;
+
+  bool exclusive = false;
+  bool readonly = false;
+  bool set_max_part = false;
+
+  std::string poolname;
+  std::string imgname;
+  std::string snapname;
+  std::string devpath;
+
+  std::string format;
+  bool pretty_format = false;
+};
+
 static void usage()
 {
-  std::cout << "Usage: rbd-nbd [options] map <image-or-snap-spec>  Map a image to nbd device\n"
-            << "               unmap <device path>                 Unmap nbd device\n"
-            << "               list-mapped                         List mapped nbd devices\n"
-            << "Options:\n"
-            << "  --device <device path>                    Specify nbd device path\n"
-            << "  --read-only                               Map readonly\n"
-            << "  --nbds_max <limit>                        Override for module param\n"
+  std::cout << "Usage: rbd-nbd [options] map <image-or-snap-spec>  Map an image to nbd device\n"
+            << "               unmap <device|image-or-snap-spec>   Unmap nbd device\n"
+            << "               [options] list-mapped               List mapped nbd devices\n"
+            << "Map options:\n"
+            << "  --device <device path>  Specify nbd device path\n"
+            << "  --read-only             Map read-only\n"
+            << "  --nbds_max <limit>      Override for module param nbds_max\n"
+            << "  --max_part <limit>      Override for module param max_part\n"
+            << "  --exclusive             Forbid writes by other clients\n"
+            << "  --timeout <seconds>     Set nbd request timeout\n"
+            << "\n"
+            << "List options:\n"
+            << "  --format plain|json|xml Output format (default: plain)\n"
+            << "  --pretty-format         Pretty formatting (json and xml)\n"
             << std::endl;
   generic_server_usage();
 }
 
-static std::string devpath, poolname("rbd"), imgname, snapname;
-static bool readonly = false;
-static int nbds_max = 0;
+static int nbd = -1;
+
+enum Command {
+  None,
+  Connect,
+  Disconnect,
+  List
+};
+
+static Command cmd = None;
+
+#define RBD_NBD_BLKSIZE 512UL
+
+#define HELP_INFO 1
+#define VERSION_INFO 2
 
 #ifdef CEPH_BIG_ENDIAN
 #define ntohll(a) (a)
 #elif defined(CEPH_LITTLE_ENDIAN)
-#define ntohll(a) swab64(a)
+#define ntohll(a) swab(a)
 #else
 #error "Could not determine endianess"
 #endif
 #define htonll(a) ntohll(a)
+
+static int parse_args(vector<const char*>& args, std::ostream *err_msg,
+                      Command *command, Config *cfg);
+
+static void handle_signal(int signum)
+{
+  assert(signum == SIGINT || signum == SIGTERM);
+  derr << "*** Got signal " << sig_str(signum) << " ***" << dendl;
+  dout(20) << __func__ << ": " << "sending NBD_DISCONNECT" << dendl;
+  if (ioctl(nbd, NBD_DISCONNECT) < 0) {
+    derr << "rbd-nbd: disconnect failed: " << cpp_strerror(errno) << dendl;
+  } else {
+    dout(20) << __func__ << ": " << "disconnected" << dendl;
+  }
+}
 
 class NBDServer
 {
@@ -91,7 +152,6 @@ public:
   NBDServer(int _fd, librbd::Image& _image)
     : fd(_fd)
     , image(_image)
-    , terminated(false)
     , lock("NBDServer::Locker")
     , reader_thread(*this, &NBDServer::reader_entry)
     , writer_thread(*this, &NBDServer::writer_entry)
@@ -99,11 +159,12 @@ public:
   {}
 
 private:
-  atomic_t terminated;
+  std::atomic<bool> terminated = { false };
 
   void shutdown()
   {
-    if (terminated.compare_and_swap(false, true)) {
+    bool expected = false;
+    if (terminated.compare_exchange_strong(expected, true)) {
       ::shutdown(fd, SHUT_RDWR);
 
       Mutex::Locker l(lock);
@@ -114,11 +175,11 @@ private:
   struct IOContext
   {
     xlist<IOContext*>::item item;
-    NBDServer *server;
+    NBDServer *server = nullptr;
     struct nbd_request request;
     struct nbd_reply reply;
     bufferlist data;
-    int command;
+    int command = 0;
 
     IOContext()
       : item(this)
@@ -150,7 +211,7 @@ private:
   IOContext *wait_io_finish()
   {
     Mutex::Locker l(lock);
-    while(io_finished.empty() && !terminated.read())
+    while(io_finished.empty() && !terminated)
       cond.Wait(lock);
 
     if (io_finished.empty())
@@ -188,7 +249,7 @@ private:
     if (ret == -EINVAL) {
       // if shrinking an image, a pagecache writeback might reference
       // extents outside of the range of the new image extents
-      dout(5) << __func__ << ": masking IO out-of-bounds error" << dendl;
+      dout(0) << __func__ << ": masking IO out-of-bounds error" << dendl;
       ctx->data.clear();
       ret = 0;
     }
@@ -201,7 +262,7 @@ private:
       ctx->data.append_zero(pad_byte_count);
       dout(20) << __func__ << ": " << *ctx << ": Pad byte count: "
                << pad_byte_count << dendl;
-      ctx->reply.error = 0;
+      ctx->reply.error = htonl(0);
     } else {
       ctx->reply.error = htonl(0);
     }
@@ -212,7 +273,7 @@ private:
 
   void reader_entry()
   {
-    while (!terminated.read()) {
+    while (!terminated) {
       ceph::unique_ptr<IOContext> ctx(new IOContext());
       ctx->server = this;
 
@@ -220,7 +281,7 @@ private:
 
       int r = safe_read_exact(fd, &ctx->request, sizeof(struct nbd_request));
       if (r < 0) {
-	derr << "failed to read nbd request header: " << cpp_strerror(errno)
+	derr << "failed to read nbd request header: " << cpp_strerror(r)
 	     << dendl;
 	return;
       }
@@ -244,7 +305,7 @@ private:
       switch (ctx->command)
       {
         case NBD_CMD_DISC:
-          // RBD_DO_IT will return when pipe is closed
+          // NBD_DO_IT will return when pipe is closed
 	  dout(0) << "disconnect request received" << dendl;
           return;
         case NBD_CMD_WRITE:
@@ -252,7 +313,7 @@ private:
 	  r = safe_read_exact(fd, ptr.c_str(), ctx->request.len);
           if (r < 0) {
 	    derr << *ctx << ": failed to read nbd request data: "
-		 << cpp_strerror(errno) << dendl;
+		 << cpp_strerror(r) << dendl;
             return;
 	  }
           ctx->data.push_back(ptr);
@@ -278,6 +339,7 @@ private:
           break;
         default:
 	  derr << *pctx << ": invalid request command" << dendl;
+          c->release();
           return;
       }
     }
@@ -286,7 +348,7 @@ private:
 
   void writer_entry()
   {
-    while (!terminated.read()) {
+    while (!terminated) {
       dout(20) << __func__ << ": waiting for io request" << dendl;
       ceph::unique_ptr<IOContext> ctx(wait_io_finish());
       if (!ctx) {
@@ -328,7 +390,7 @@ private:
       ,func(_func)
     {}
   protected:
-    virtual void* entry()
+    void* entry() override
     {
       (server.*func)();
       server.shutdown();
@@ -350,7 +412,7 @@ public:
     }
   }
 
-  void stop()
+  ~NBDServer()
   {
     if (started) {
       dout(10) << __func__ << ": terminating" << dendl;
@@ -364,11 +426,6 @@ public:
 
       started = false;
     }
-  }
-
-  ~NBDServer()
-  {
-    stop();
   }
 };
 
@@ -391,7 +448,7 @@ std::ostream &operator<<(std::ostream &os, const NBDServer::IOContext &ctx) {
     os << " TRIM ";
     break;
   default:
-    os << " UNKNOW(" << ctx.command << ") ";
+    os << " UNKNOWN(" << ctx.command << ") ";
     break;
   }
 
@@ -419,49 +476,174 @@ public:
     , size(_size)
   { }
 
-  virtual ~NBDWatchCtx() {}
+  ~NBDWatchCtx() override {}
 
-  virtual void handle_notify()
+  void handle_notify() override
   {
     librbd::image_info_t info;
     if (image.stat(info, sizeof(info)) == 0) {
       unsigned long new_size = info.size;
 
       if (new_size != size) {
+        dout(5) << "resize detected" << dendl;
         if (ioctl(fd, BLKFLSBUF, NULL) < 0)
-            derr << "invalidate page cache failed: " << cpp_strerror(errno) << dendl;
-        if (ioctl(fd, NBD_SET_SIZE, new_size) < 0)
+            derr << "invalidate page cache failed: " << cpp_strerror(errno)
+                 << dendl;
+        if (ioctl(fd, NBD_SET_SIZE, new_size) < 0) {
             derr << "resize failed: " << cpp_strerror(errno) << dendl;
+        } else {
+          size = new_size;
+        }
+        if (ioctl(fd, BLKRRPART, NULL) < 0) {
+          derr << "rescan of partition table failed: " << cpp_strerror(errno)
+               << dendl;
+        }
         if (image.invalidate_cache() < 0)
             derr << "invalidate rbd cache failed" << dendl;
-        size = new_size;
       }
     }
   }
 };
 
-static int open_device(const char* path, bool try_load_moudle = false)
+class NBDListIterator {
+public:
+  bool get(int *pid, Config *cfg) {
+    while (true) {
+      std::string nbd_path = "/sys/block/nbd" + stringify(m_index);
+      if(access(nbd_path.c_str(), F_OK) != 0) {
+        return false;
+      }
+
+      *cfg = Config();
+      cfg->devpath = "/dev/nbd" + stringify(m_index++);
+
+      std::ifstream ifs;
+      ifs.open(nbd_path + "/pid", std::ifstream::in);
+      if (!ifs.is_open()) {
+        continue;
+      }
+      ifs >> *pid;
+
+      int r = get_mapped_info(*pid, cfg);
+      if (r < 0) {
+        continue;
+      }
+
+      return true;
+    }
+  }
+
+private:
+  int m_index = 0;
+
+  int get_mapped_info(int pid, Config *cfg) {
+    int r;
+    std::string path = "/proc/" + stringify(pid) + "/cmdline";
+    std::ifstream ifs;
+    std::string cmdline;
+    std::vector<const char*> args;
+
+    ifs.open(path.c_str(), std::ifstream::in);
+    if (!ifs.is_open())
+      return -1;
+    ifs >> cmdline;
+
+    for (unsigned i = 0; i < cmdline.size(); i++) {
+      const char *arg = &cmdline[i];
+      if (i == 0) {
+        if (strcmp(basename(arg) , "rbd-nbd") != 0) {
+          return -EINVAL;
+        }
+      } else {
+        args.push_back(arg);
+      }
+
+      while (cmdline[i] != '\0') {
+        i++;
+      }
+    }
+
+    std::ostringstream err_msg;
+    Command command;
+    r = parse_args(args, &err_msg, &command, cfg);
+    if (r < 0) {
+      return r;
+    }
+
+    if (command != Connect) {
+      return -ENOENT;
+    }
+
+    return 0;
+  }
+};
+
+static int open_device(const char* path, Config *cfg = nullptr, bool try_load_module = false)
 {
   int nbd = open(path, O_RDWR);
-  if (nbd < 0 && try_load_moudle && access("/sys/module/nbd", F_OK) != 0) {
+  bool loaded_module = false;
+
+  if (nbd < 0 && try_load_module && access("/sys/module/nbd", F_OK) != 0) {
+    ostringstream param;
     int r;
-    if (nbds_max) {
-      ostringstream param;
-      param << "nbds_max=" << nbds_max;
-      r = module_load("nbd", param.str().c_str());
-    } else {
-      r = module_load("nbd", NULL);
+    if (cfg->nbds_max) {
+      param << "nbds_max=" << cfg->nbds_max;
     }
+    if (cfg->max_part) {
+        param << " max_part=" << cfg->max_part;
+    }
+    r = module_load("nbd", param.str().c_str());
     if (r < 0) {
       cerr << "rbd-nbd: failed to load nbd kernel module: " << cpp_strerror(-r) << std::endl;
       return r;
+    } else {
+      loaded_module = true;
     }
     nbd = open(path, O_RDWR);
   }
+
+  if (try_load_module && !loaded_module &&
+      (cfg->nbds_max || cfg->set_max_part)) {
+    cerr << "rbd-nbd: ignoring kernel module parameter options: nbd module already loaded" 
+         << std::endl;
+  }
+
   return nbd;
 }
 
-static int do_map()
+static int check_device_size(int nbd_index, unsigned long expected_size)
+{
+  // There are bugs with some older kernel versions that result in an
+  // overflow for large image sizes. This check is to ensure we are
+  // not affected.
+
+  unsigned long size = 0;
+  std::string path = "/sys/block/nbd" + stringify(nbd_index) + "/size";
+  std::ifstream ifs;
+  ifs.open(path.c_str(), std::ifstream::in);
+  if (!ifs.is_open()) {
+    cerr << "rbd-nbd: failed to open " << path << std::endl;
+    return -EINVAL;
+  }
+  ifs >> size;
+  size *= RBD_NBD_BLKSIZE;
+
+  if (size == 0) {
+    // Newer kernel versions will report real size only after nbd
+    // connect. Assume this is the case and return success.
+    return 0;
+  }
+
+  if (size != expected_size) {
+    cerr << "rbd-nbd: kernel reported invalid device size (" << size
+         << ", expected " << expected_size << ")" << std::endl;
+    return -EINVAL;
+  }
+
+  return 0;
+}
+
+static int do_map(int argc, const char *argv[], Config *cfg)
 {
   int r;
 
@@ -470,17 +652,24 @@ static int do_map()
   librados::IoCtx io_ctx;
   librbd::Image image;
 
-  int read_only;
+  int read_only = 0;
   unsigned long flags;
   unsigned long size;
 
+  int index = 0;
   int fd[2];
-  int nbd;
 
-  uint8_t old_format;
   librbd::image_info_t info;
 
   Preforker forker;
+
+  vector<const char*> args;
+  argv_to_vec(argc, argv, args);
+
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+                         CODE_ENVIRONMENT_DAEMON,
+                         CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS);
+  g_ceph_context->_conf->set_val_or_die("pid_file", "");
 
   if (global_init_prefork(g_ceph_context) >= 0) {
     std::string err;
@@ -489,13 +678,13 @@ static int do_map()
       cerr << err << std::endl;
       return r;
     }
-
     if (forker.is_parent()) {
       if (forker.parent_wait(err) != 0) {
-	return -ENXIO;
+        return -ENXIO;
       }
       return 0;
     }
+    global_init_postfork_start(g_ceph_context);
   }
 
   common_init_finish(g_ceph_context);
@@ -506,14 +695,30 @@ static int do_map()
     goto close_ret;
   }
 
-  if (devpath.empty()) {
+  if (cfg->devpath.empty()) {
     char dev[64];
-    int index = 0;
+    bool try_load_module = true;
+    const char *path = "/sys/module/nbd/parameters/nbds_max";
+    int nbds_max = -1;
+    if (access(path, F_OK) == 0) {
+      std::ifstream ifs;
+      ifs.open(path, std::ifstream::in);
+      if (ifs.is_open()) {
+        ifs >> nbds_max;
+        ifs.close();
+      }
+    }
+
     while (true) {
       snprintf(dev, sizeof(dev), "/dev/nbd%d", index);
 
-      nbd = open_device(dev, true);
+      nbd = open_device(dev, cfg, try_load_module);
+      try_load_module = false;
       if (nbd < 0) {
+        if (nbd == -EPERM && nbds_max != -1 && index < (nbds_max-1)) {
+          ++index;
+          continue;
+        }
         r = nbd;
         cerr << "rbd-nbd: failed to find unused device" << std::endl;
         goto close_fd;
@@ -526,29 +731,37 @@ static int do_map()
         continue;
       }
 
-      devpath = dev;
+      cfg->devpath = dev;
       break;
     }
   } else {
-    nbd = open_device(devpath.c_str(), true);
+    r = sscanf(cfg->devpath.c_str(), "/dev/nbd%d", &index);
+    if (r < 0) {
+      cerr << "rbd-nbd: invalid device path: " << cfg->devpath
+           << " (expected /dev/nbd{num})" << std::endl;
+      goto close_fd;
+    }
+    nbd = open_device(cfg->devpath.c_str(), cfg, true);
     if (nbd < 0) {
       r = nbd;
-      cerr << "rbd-nbd: failed to open device: " << devpath << std::endl;
+      cerr << "rbd-nbd: failed to open device: " << cfg->devpath << std::endl;
       goto close_fd;
     }
 
     r = ioctl(nbd, NBD_SET_SOCK, fd[0]);
     if (r < 0) {
       r = -errno;
-      cerr << "rbd-nbd: the device " << devpath << " is busy" << std::endl;
+      cerr << "rbd-nbd: the device " << cfg->devpath << " is busy" << std::endl;
       close(nbd);
       goto close_fd;
     }
   }
 
   flags = NBD_FLAG_SEND_FLUSH | NBD_FLAG_SEND_TRIM | NBD_FLAG_HAS_FLAGS;
-  if (!snapname.empty() || readonly)
+  if (!cfg->snapname.empty() || cfg->readonly) {
     flags |= NBD_FLAG_READ_ONLY;
+    read_only = 1;
+  }
 
   r = rados.init_with_context(g_ceph_context);
   if (r < 0)
@@ -558,16 +771,25 @@ static int do_map()
   if (r < 0)
     goto close_nbd;
 
-  r = rados.ioctx_create(poolname.c_str(), io_ctx);
+  r = rados.ioctx_create(cfg->poolname.c_str(), io_ctx);
   if (r < 0)
     goto close_nbd;
 
-  r = rbd.open(io_ctx, image, imgname.c_str());
+  r = rbd.open(io_ctx, image, cfg->imgname.c_str());
   if (r < 0)
     goto close_nbd;
 
-  if (!snapname.empty()) {
-    r = image.snap_set(snapname.c_str());
+  if (cfg->exclusive) {
+    r = image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE);
+    if (r < 0) {
+      cerr << "rbd-nbd: failed to acquire exclusive lock: " << cpp_strerror(r)
+           << std::endl;
+      goto close_nbd;
+    }
+  }
+
+  if (!cfg->snapname.empty()) {
+    r = image.snap_set(cfg->snapname.c_str());
     if (r < 0)
       goto close_nbd;
   }
@@ -576,31 +798,49 @@ static int do_map()
   if (r < 0)
     goto close_nbd;
 
-  r = ioctl(nbd, NBD_SET_BLKSIZE, 512UL);
+  r = ioctl(nbd, NBD_SET_BLKSIZE, RBD_NBD_BLKSIZE);
   if (r < 0) {
     r = -errno;
     goto close_nbd;
   }
 
+  if (info.size > ULONG_MAX) {
+    r = -EFBIG;
+    cerr << "rbd-nbd: image is too large (" << prettybyte_t(info.size)
+         << ", max is " << prettybyte_t(ULONG_MAX) << ")" << std::endl;
+    goto close_nbd;
+  }
+
   size = info.size;
+
   r = ioctl(nbd, NBD_SET_SIZE, size);
   if (r < 0) {
     r = -errno;
     goto close_nbd;
   }
 
+  r = check_device_size(index, size);
+  if (r < 0) {
+    goto close_nbd;
+  }
+
   ioctl(nbd, NBD_SET_FLAGS, flags);
 
-  read_only = snapname.empty() ? 0 : 1;
   r = ioctl(nbd, BLKROSET, (unsigned long) &read_only);
   if (r < 0) {
     r = -errno;
     goto close_nbd;
   }
 
-  r = image.old_format(&old_format);
-  if (r < 0)
-    goto close_nbd;
+  if (cfg->timeout >= 0) {
+    r = ioctl(nbd, NBD_SET_TIMEOUT, (unsigned long)cfg->timeout);
+    if (r < 0) {
+      r = -errno;
+      cerr << "rbd-nbd: failed to set timeout: " << cpp_strerror(r)
+           << std::endl;
+      goto close_nbd;
+    }
+  }
 
   {
     uint64_t handle;
@@ -610,20 +850,29 @@ static int do_map()
     if (r < 0)
       goto close_nbd;
 
-    cout << devpath << std::endl;
+    cout << cfg->devpath << std::endl;
 
     if (g_conf->daemonize) {
-      forker.daemonize();
-      global_init_postfork_start(g_ceph_context);
       global_init_postfork_finish(g_ceph_context);
+      forker.daemonize();
     }
 
     {
       NBDServer server(fd[1], image);
 
       server.start();
+
+      init_async_signal_handler();
+      register_async_signal_handler(SIGHUP, sighup_handler);
+      register_async_signal_handler_oneshot(SIGINT, handle_signal);
+      register_async_signal_handler_oneshot(SIGTERM, handle_signal);
+
       ioctl(nbd, NBD_DO_IT);
-      server.stop();
+
+      unregister_async_signal_handler(SIGHUP, sighup_handler);
+      unregister_async_signal_handler(SIGINT, handle_signal);
+      unregister_async_signal_handler(SIGTERM, handle_signal);
+      shutdown_async_signal_handler();
     }
 
     r = image.update_unwatch(handle);
@@ -649,9 +898,9 @@ close_ret:
   return r;
 }
 
-static int do_unmap()
+static int do_unmap(const std::string &devpath)
 {
-  common_init_finish(g_ceph_context);
+  int r = 0;
 
   int nbd = open_device(devpath.c_str());
   if (nbd < 0) {
@@ -659,110 +908,181 @@ static int do_unmap()
     return nbd;
   }
 
-  // alert the reader thread to shut down
-  if (ioctl(nbd, NBD_DISCONNECT) < 0) {
-    cerr << "rbd-nbd: the device is not used" << std::endl;
+  r = ioctl(nbd, NBD_DISCONNECT);
+  if (r < 0) {
+      cerr << "rbd-nbd: the device is not used" << std::endl; 
   }
+
   close(nbd);
 
-  return 0;
+  return r;
 }
 
-static int parse_imgpath(const std::string &imgpath)
-{
-  boost::regex pattern("^(?:([^/@]+)/)?([^/@]+)(?:@([^/@]+))?$");
-  boost::smatch match;
-  if (!boost::regex_match(imgpath, match, pattern)) {
+static int parse_imgpath(const std::string &imgpath, Config *cfg,
+                         std::ostream *err_msg) {
+  std::regex pattern("^(?:([^/@]+)/)?([^/@]+)(?:@([^/@]+))?$");
+  std::smatch match;
+  if (!std::regex_match(imgpath, match, pattern)) {
     std::cerr << "rbd-nbd: invalid spec '" << imgpath << "'" << std::endl;
     return -EINVAL;
   }
 
-  if (match[1].matched)
-    poolname = match[1];
+  if (match[1].matched) {
+    cfg->poolname = match[1];
+  }
 
-  imgname = match[2];
+  cfg->imgname = match[2];
 
   if (match[3].matched)
-    snapname = match[3];
+    cfg->snapname = match[3];
 
   return 0;
 }
 
-static int do_list_mapped_devices()
+static int do_list_mapped_devices(const std::string &format, bool pretty_format)
 {
-  char path[64];
-  int m = 0;
-  int fd[2];
+  bool should_print = false;
+  std::unique_ptr<ceph::Formatter> f;
+  TextTable tbl;
 
-  common_init_finish(g_ceph_context);
-
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == -1) {
-    int r = -errno;
-    cerr << "rbd-nbd: socketpair failed: " << cpp_strerror(-r) << std::endl;
-    return r;
+  if (format == "json") {
+    f.reset(new JSONFormatter(pretty_format));
+  } else if (format == "xml") {
+    f.reset(new XMLFormatter(pretty_format));
+  } else if (!format.empty() && format != "plain") {
+    std::cerr << "rbd-nbd: invalid output format: " << format << std::endl;
+    return -EINVAL;
   }
 
-  while (true) {
-    snprintf(path, sizeof(path), "/dev/nbd%d", m);
-    int nbd = open_device(path);
-    if (nbd < 0)
-      break;
-    if (ioctl(nbd, NBD_SET_SOCK, fd[0]) != 0)
-      cout << path << std::endl;
-    else
-      ioctl(nbd, NBD_CLEAR_SOCK);
-    close(nbd);
-    m++;
+  if (f) {
+    f->open_array_section("devices");
+  } else {
+    tbl.define_column("id", TextTable::LEFT, TextTable::LEFT);
+    tbl.define_column("pool", TextTable::LEFT, TextTable::LEFT);
+    tbl.define_column("image", TextTable::LEFT, TextTable::LEFT);
+    tbl.define_column("snap", TextTable::LEFT, TextTable::LEFT);
+    tbl.define_column("device", TextTable::LEFT, TextTable::LEFT);
   }
 
-  close(fd[0]);
-  close(fd[1]);
+  int pid;
+  Config cfg;
+  NBDListIterator it;
+  while (it.get(&pid, &cfg)) {
+    if (f) {
+      f->open_object_section("device");
+      f->dump_int("id", pid);
+      f->dump_string("pool", cfg.poolname);
+      f->dump_string("image", cfg.imgname);
+      f->dump_string("snap", cfg.snapname);
+      f->dump_string("device", cfg.devpath);
+      f->close_section();
+    } else {
+      should_print = true;
+      if (cfg.snapname.empty()) {
+        cfg.snapname = "-";
+      }
+      tbl << pid << cfg.poolname << cfg.imgname << cfg.snapname << cfg.devpath
+          << TextTable::endrow;
+    }
+  }
 
+  if (f) {
+    f->close_section(); // devices
+    f->flush(std::cout);
+  }
+  if (should_print) {
+    std::cout << tbl;
+  }
   return 0;
 }
 
-static int rbd_nbd(int argc, const char *argv[])
-{
-  int r;
-  enum {
-    None,
-    Connect,
-    Disconnect,
-    List
-  } cmd = None;
+static bool find_mapped_dev_by_spec(Config *cfg) {
+  int pid;
+  Config c;
+  NBDListIterator it;
+  while (it.get(&pid, &c)) {
+    if (c.poolname == cfg->poolname && c.imgname == cfg->imgname &&
+        c.snapname == cfg->snapname) {
+      *cfg = c;
+      return true;
+    }
+  }
+  return false;
+}
 
-  vector<const char*> args;
 
-  argv_to_vec(argc, argv, args);
-  env_to_vec(args);
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_DAEMON,
-              CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS);
-  g_ceph_context->_conf->set_val_or_die("pid_file", "");
+static int parse_args(vector<const char*>& args, std::ostream *err_msg,
+                      Command *command, Config *cfg) {
+  std::string conf_file_list;
+  std::string cluster;
+  CephInitParameters iparams = ceph_argparse_early_args(
+          args, CEPH_ENTITY_TYPE_CLIENT, &cluster, &conf_file_list);
+
+  md_config_t config;
+  config.name = iparams.name;
+  config.cluster = cluster;
+
+  if (!conf_file_list.empty()) {
+    config.parse_config_files(conf_file_list.c_str(), nullptr, 0);
+  } else {
+    config.parse_config_files(nullptr, nullptr, 0);
+  }
+  config.parse_env();
+  config.parse_argv(args);
+  cfg->poolname = config.get_val<std::string>("rbd_default_pool");
 
   std::vector<const char*>::iterator i;
   std::ostringstream err;
 
   for (i = args.begin(); i != args.end(); ) {
     if (ceph_argparse_flag(args, i, "-h", "--help", (char*)NULL)) {
-      usage();
-      return 0;
-    } else if (ceph_argparse_witharg(args, i, &devpath, "--device", (char *)NULL)) {
-    } else if (ceph_argparse_witharg(args, i, &nbds_max, err, "--nbds_max", (char *)NULL)) {
+      return HELP_INFO;
+    } else if (ceph_argparse_flag(args, i, "-v", "--version", (char*)NULL)) {
+      return VERSION_INFO;
+    } else if (ceph_argparse_witharg(args, i, &cfg->devpath, "--device", (char *)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &cfg->nbds_max, err, "--nbds_max", (char *)NULL)) {
       if (!err.str().empty()) {
-        cerr << err.str() << std::endl;
-        return EXIT_FAILURE;
+        *err_msg << "rbd-nbd: " << err.str();
+        return -EINVAL;
       }
-      if (nbds_max < 0) {
-        cerr << "rbd-nbd: Invalid argument for nbds_max!" << std::endl;
-        return EXIT_FAILURE;
+      if (cfg->nbds_max < 0) {
+        *err_msg << "rbd-nbd: Invalid argument for nbds_max!";
+        return -EINVAL;
       }
+    } else if (ceph_argparse_witharg(args, i, &cfg->max_part, err, "--max_part", (char *)NULL)) {
+      if (!err.str().empty()) {
+        *err_msg << "rbd-nbd: " << err.str();
+        return -EINVAL;
+      }
+      if ((cfg->max_part < 0) || (cfg->max_part > 255)) {
+        *err_msg << "rbd-nbd: Invalid argument for max_part(0~255)!";
+        return -EINVAL;
+      }
+      cfg->set_max_part = true;
     } else if (ceph_argparse_flag(args, i, "--read-only", (char *)NULL)) {
-      readonly = true;
+      cfg->readonly = true;
+    } else if (ceph_argparse_flag(args, i, "--exclusive", (char *)NULL)) {
+      cfg->exclusive = true;
+    } else if (ceph_argparse_witharg(args, i, &cfg->timeout, err, "--timeout",
+                                     (char *)NULL)) {
+      if (!err.str().empty()) {
+        *err_msg << "rbd-nbd: " << err.str();
+        return -EINVAL;
+      }
+      if (cfg->timeout < 0) {
+        *err_msg << "rbd-nbd: Invalid argument for timeout!";
+        return -EINVAL;
+      }
+    } else if (ceph_argparse_witharg(args, i, &cfg->format, err, "--format",
+                                     (char *)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--pretty-format", (char *)NULL)) {
+      cfg->pretty_format = true;
     } else {
       ++i;
     }
   }
 
+  Command cmd = None;
   if (args.begin() != args.end()) {
     if (strcmp(*args.begin(), "map") == 0) {
       cmd = Connect;
@@ -771,33 +1091,44 @@ static int rbd_nbd(int argc, const char *argv[])
     } else if (strcmp(*args.begin(), "list-mapped") == 0) {
       cmd = List;
     } else {
-      cerr << "rbd-nbd: unknown command: " << *args.begin() << std::endl;
-      return EXIT_FAILURE;
+      *err_msg << "rbd-nbd: unknown command: " <<  *args.begin();
+      return -EINVAL;
     }
     args.erase(args.begin());
   }
 
   if (cmd == None) {
-    cerr << "rbd-nbd: must specify command" << std::endl;
-    return EXIT_FAILURE;
+    *err_msg << "rbd-nbd: must specify command";
+    return -EINVAL;
   }
 
   switch (cmd) {
     case Connect:
       if (args.begin() == args.end()) {
-        cerr << "rbd-nbd: must specify image-or-snap-spec" << std::endl;
-        return EXIT_FAILURE;
+        *err_msg << "rbd-nbd: must specify image-or-snap-spec";
+        return -EINVAL;
       }
-      if (parse_imgpath(string(*args.begin())) < 0)
-        return EXIT_FAILURE;
+      if (parse_imgpath(*args.begin(), cfg, err_msg) < 0) {
+        return -EINVAL;
+      }
       args.erase(args.begin());
       break;
     case Disconnect:
       if (args.begin() == args.end()) {
-        cerr << "rbd-nbd: must specify nbd device path" << std::endl;
-        return EXIT_FAILURE;
+        *err_msg << "rbd-nbd: must specify nbd device or image-or-snap-spec";
+        return -EINVAL;
       }
-      devpath = *args.begin();
+      if (boost::starts_with(*args.begin(), "/dev/")) {
+        cfg->devpath = *args.begin();
+      } else {
+        if (parse_imgpath(*args.begin(), cfg, err_msg) < 0) {
+          return -EINVAL;
+        }
+        if (!find_mapped_dev_by_spec(cfg)) {
+          *err_msg << "rbd-nbd: " << *args.begin() << " is not mapped";
+          return -ENOENT;
+        }
+      }
       args.erase(args.begin());
       break;
     default:
@@ -806,34 +1137,60 @@ static int rbd_nbd(int argc, const char *argv[])
   }
 
   if (args.begin() != args.end()) {
-    cerr << "rbd-nbd: unknown args: " << *args.begin() << std::endl;
-    return EXIT_FAILURE;
+    *err_msg << "rbd-nbd: unknown args: " << *args.begin();
+    return -EINVAL;
+  }
+
+  *command = cmd;
+  return 0;
+}
+
+static int rbd_nbd(int argc, const char *argv[])
+{
+  int r;
+  Config cfg;
+  vector<const char*> args;
+  argv_to_vec(argc, argv, args);
+
+  std::ostringstream err_msg;
+  r = parse_args(args, &err_msg, &cmd, &cfg);
+  if (r == HELP_INFO) {
+    usage();
+    ceph_abort();
+  } else if (r == VERSION_INFO) {
+    std::cout << pretty_version_to_str() << std::endl;
+    return 0;
+  }
+  else if (r < 0) {
+    cerr << err_msg.str() << std::endl;
+    return r;
   }
 
   switch (cmd) {
     case Connect:
-      if (imgname.empty()) {
+      if (cfg.imgname.empty()) {
         cerr << "rbd-nbd: image name was not specified" << std::endl;
-        return EXIT_FAILURE;
+        return -EINVAL;
       }
 
-      r = do_map();
+      r = do_map(argc, argv, &cfg);
       if (r < 0)
-        return EXIT_FAILURE;
+        return -EINVAL;
       break;
     case Disconnect:
-      r = do_unmap();
+      r = do_unmap(cfg.devpath);
       if (r < 0)
-        return EXIT_FAILURE;
+        return -EINVAL;
       break;
     case List:
-      r = do_list_mapped_devices();
+      r = do_list_mapped_devices(cfg.format, cfg.pretty_format);
       if (r < 0)
-        return EXIT_FAILURE;
+        return -EINVAL;
       break;
     default:
       usage();
-      return EXIT_FAILURE;
+      ceph_abort();
+      break;
   }
 
   return 0;
@@ -841,5 +1198,9 @@ static int rbd_nbd(int argc, const char *argv[])
 
 int main(int argc, const char *argv[])
 {
-  return rbd_nbd(argc, argv);
+  int r = rbd_nbd(argc, argv);
+  if (r < 0) {
+    return EXIT_FAILURE;
+  }
+  return 0;
 }

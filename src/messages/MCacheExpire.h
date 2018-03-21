@@ -15,6 +15,8 @@
 #ifndef CEPH_MCACHEEXPIRE_H
 #define CEPH_MCACHEEXPIRE_H
 
+#include <string_view>
+
 #include "mds/mdstypes.h"
 
 class MCacheExpire : public Message {
@@ -44,14 +46,16 @@ public:
     }
 
     void encode(bufferlist &bl) const {
-      ::encode(inodes, bl);
-      ::encode(dirs, bl);
-      ::encode(dentries, bl);
+      using ceph::encode;
+      encode(inodes, bl);
+      encode(dirs, bl);
+      encode(dentries, bl);
     }
     void decode(bufferlist::iterator &bl) {
-      ::decode(inodes, bl);
-      ::decode(dirs, bl);
-      ::decode(dentries, bl);
+      using ceph::decode;
+      decode(inodes, bl);
+      decode(dirs, bl);
+      decode(dentries, bl);
     }
   };
   WRITE_CLASS_ENCODER(realm)
@@ -65,10 +69,10 @@ public:
     Message(MSG_MDS_CACHEEXPIRE),
     from(f) { }
 private:
-  ~MCacheExpire() {}
+  ~MCacheExpire() override {}
 
 public:
-  virtual const char *get_type_name() const { return "cache_expire";}
+  const char *get_type_name() const override { return "cache_expire";}
   
   void add_inode(dirfrag_t r, vinodeno_t vino, unsigned nonce) {
     realms[r].inodes[vino] = nonce;
@@ -76,7 +80,7 @@ public:
   void add_dir(dirfrag_t r, dirfrag_t df, unsigned nonce) {
     realms[r].dirs[df] = nonce;
   }
-  void add_dentry(dirfrag_t r, dirfrag_t df, const string& dn, snapid_t last, unsigned nonce) {
+  void add_dentry(dirfrag_t r, dirfrag_t df, std::string_view dn, snapid_t last, unsigned nonce) {
     realms[r].dentries[df][pair<string,snapid_t>(dn,last)] = nonce;
   }
 
@@ -87,15 +91,17 @@ public:
       realms[df].merge(r);
   }
 
-  void decode_payload() {
+  void decode_payload() override {
+    using ceph::decode;
     bufferlist::iterator p = payload.begin();
-    ::decode(from, p);
-    ::decode(realms, p);
+    decode(from, p);
+    decode(realms, p);
   }
     
-  void encode_payload(uint64_t features) {
-    ::encode(from, payload);
-    ::encode(realms, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(from, payload);
+    encode(realms, payload);
   }
 };
 

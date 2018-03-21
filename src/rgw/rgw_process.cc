@@ -17,7 +17,7 @@
 
 void RGWProcess::RGWWQ::_dump_queue()
 {
-  if (!g_conf->subsys.should_gather(ceph_subsys_rgw, 20)) {
+  if (!g_conf->subsys.should_gather<ceph_subsys_rgw, 20>()) {
     return;
   }
   deque<RGWRequest *>::iterator iter;
@@ -84,7 +84,7 @@ int rgw_process_authenticated(RGWHandler_REST * const handler,
   if (ret < 0) {
     if (s->system_request) {
       dout(2) << "overriding permissions due to system operation" << dendl;
-    } else if (s->auth_identity->is_admin_of(s->user->user_id)) {
+    } else if (s->auth.identity->is_admin_of(s->user->user_id)) {
       dout(2) << "overriding permissions due to admin operation" << dendl;
     } else {
       return ret;
@@ -109,12 +109,16 @@ int rgw_process_authenticated(RGWHandler_REST * const handler,
   return 0;
 }
 
-int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
-		    RGWStreamIO* client_io, OpsLogSocket* olog)
+int process_request(RGWRados* const store,
+                    RGWREST* const rest,
+                    RGWRequest* const req,
+                    const std::string& frontend_prefix,
+                    const rgw_auth_registry_t& auth_registry,
+                    RGWRestfulIO* const client_io,
+                    OpsLogSocket* const olog,
+                    int* http_ret)
 {
-  int ret = 0;
-
-  client_io->init(g_ceph_context);
+  int ret = client_io->init(g_ceph_context);
 
   req->log_init();
 
@@ -132,20 +136,28 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
   RGWObjectCtx rados_ctx(store, s);
   s->obj_ctx = &rados_ctx;
 
+  if (ret < 0) {
+    s->cio = client_io;
+    abort_early(s, nullptr, ret, nullptr);
+    return ret;
+  }
+
   s->req_id = store->unique_id(req->id);
   s->trans_id = store->unique_trans_id(req->id);
   s->host_id = store->host_id;
 
   req->log_format(s, "initializing for trans_id = %s", s->trans_id.c_str());
 
-  RGWOp* op = NULL;
+  RGWOp* op = nullptr;
   int init_error = 0;
   bool should_log = false;
   RGWRESTMgr *mgr;
-  RGWHandler_REST *handler = rest->get_handler(store, s, client_io, &mgr,
-					      &init_error);
+  RGWHandler_REST *handler = rest->get_handler(store, s,
+                                               auth_registry,
+                                               frontend_prefix,
+                                               client_io, &mgr, &init_error);
   if (init_error != 0) {
-    abort_early(s, NULL, init_error, NULL);
+    abort_early(s, nullptr, init_error, nullptr);
     goto done;
   }
   dout(10) << "handler=" << typeid(*handler).name() << dendl;
@@ -158,13 +170,14 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
     abort_early(s, NULL, -ERR_METHOD_NOT_ALLOWED, handler);
     goto done;
   }
+
   req->op = op;
   dout(10) << "op=" << typeid(*op).name() << dendl;
 
   s->op_type = op->get_type();
 
-  req->log(s, "authorizing");
-  ret = handler->authorize();
+  req->log(s, "verifying requester");
+  ret = op->verify_requester(auth_registry);
   if (ret < 0) {
     dout(10) << "failed to authorize request" << dendl;
     abort_early(s, NULL, ret, handler);
@@ -173,8 +186,8 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
 
   /* FIXME: remove this after switching all handlers to the new authentication
    * infrastructure. */
-  if (nullptr == s->auth_identity) {
-    s->auth_identity = rgw_auth_transform_old_authinfo(s);
+  if (nullptr == s->auth.identity) {
+    s->auth.identity = rgw::auth::transform_old_authinfo(s);
   }
 
   req->log(s, "normalizing buckets and tenants");
@@ -197,22 +210,27 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
     goto done;
   }
 done:
-  int r = client_io->complete_request();
-  if (r < 0) {
-    dout(0) << "ERROR: client_io->complete_request() returned " << r << dendl;
-  }
-  if (should_log) {
-    rgw_log_op(store, s, (op ? op->name() : "unknown"), olog);
+  try {
+    client_io->complete_request();
+  } catch (rgw::io::Exception& e) {
+    dout(0) << "ERROR: client_io->complete_request() returned "
+            << e.what() << dendl;
   }
 
-  int http_ret = s->err.http_ret;
+  if (should_log) {
+    rgw_log_op(store, rest, s, (op ? op->name() : "unknown"), olog);
+  }
+
+  if (http_ret != nullptr) {
+    *http_ret = s->err.http_ret;
+  }
   int op_ret = 0;
   if (op) {
     op_ret = op->get_ret();
   }
 
   req->log_format(s, "op status=%d", op_ret);
-  req->log_format(s, "http status=%d", http_ret);
+  req->log_format(s, "http status=%d", s->err.http_ret);
 
   if (handler)
     handler->put_op(op);
@@ -220,7 +238,7 @@ done:
 
   dout(1) << "====== req done req=" << hex << req << dec
 	  << " op status=" << op_ret
-	  << " http_status=" << http_ret
+	  << " http_status=" << s->err.http_ret
 	  << " ======"
 	  << dendl;
 

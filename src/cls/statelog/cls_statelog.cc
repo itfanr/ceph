@@ -1,29 +1,15 @@
 // -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
-#include <iostream>
-
-#include <string.h>
-#include <stdlib.h>
 #include <errno.h>
 
-#include "include/types.h"
-#include "include/utime.h"
 #include "objclass/objclass.h"
 
-#include "cls_statelog_types.h"
 #include "cls_statelog_ops.h"
 
-#include "global/global_context.h"
 
 CLS_VER(1,0)
 CLS_NAME(statelog)
-
-cls_handle_t h_class;
-cls_method_handle_t h_statelog_add;
-cls_method_handle_t h_statelog_list;
-cls_method_handle_t h_statelog_remove;
-cls_method_handle_t h_statelog_check_state;
 
 static string statelog_index_by_client_prefix = "1_";
 static string statelog_index_by_object_prefix = "2_";
@@ -32,7 +18,7 @@ static string statelog_index_by_object_prefix = "2_";
 static int write_statelog_entry(cls_method_context_t hctx, const string& index, const cls_statelog_entry& entry)
 {
   bufferlist bl;
-  ::encode(entry, bl);
+  encode(entry, bl);
 
   int ret = cls_cxx_map_set_val(hctx, index, &bl);
   if (ret < 0)
@@ -89,7 +75,7 @@ static int get_existing_entry(cls_method_context_t hctx, const string& client_id
   }
   try {
     bufferlist::iterator iter = bl.begin();
-    ::decode(entry, iter);
+    decode(entry, iter);
   } catch (buffer::error& err) {
     CLS_LOG(0, "ERROR: failed to decode entry %s", obj_index.c_str());
     return -EIO;
@@ -112,7 +98,7 @@ static int cls_statelog_add(cls_method_context_t hctx, bufferlist *in, bufferlis
 
   cls_statelog_add_op op;
   try {
-    ::decode(op, in_iter);
+    decode(op, in_iter);
   } catch (buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_statelog_add_op(): failed to decode op");
     return -EINVAL;
@@ -152,7 +138,7 @@ static int cls_statelog_list(cls_method_context_t hctx, bufferlist *in, bufferli
 
   cls_statelog_list_op op;
   try {
-    ::decode(op, in_iter);
+    decode(op, in_iter);
   } catch (buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_statelog_list_op(): failed to decode op");
     return -EINVAL;
@@ -182,21 +168,20 @@ static int cls_statelog_list(cls_method_context_t hctx, bufferlist *in, bufferli
   if (!max_entries || max_entries > MAX_ENTRIES)
     max_entries = MAX_ENTRIES;
 
-  int rc = cls_cxx_map_get_vals(hctx, from_index, match_prefix, max_entries + 1, &keys);
+  cls_statelog_list_ret ret;
+
+  int rc = cls_cxx_map_get_vals(hctx, from_index, match_prefix, max_entries, &keys, &ret.truncated);
   if (rc < 0)
     return rc;
 
   CLS_LOG(20, "from_index=%s match_prefix=%s", from_index.c_str(), match_prefix.c_str());
-  cls_statelog_list_ret ret;
 
   list<cls_statelog_entry>& entries = ret.entries;
   map<string, bufferlist>::iterator iter = keys.begin();
 
-  bool done = false;
   string marker;
 
-  size_t i;
-  for (i = 0; i < max_entries && iter != keys.end(); ++i, ++iter) {
+  for (; iter != keys.end(); ++iter) {
     const string& index = iter->first;
     marker = index;
 
@@ -204,21 +189,18 @@ static int cls_statelog_list(cls_method_context_t hctx, bufferlist *in, bufferli
     bufferlist::iterator biter = bl.begin();
     try {
       cls_statelog_entry e;
-      ::decode(e, biter);
+      decode(e, biter);
       entries.push_back(e);
     } catch (buffer::error& err) {
       CLS_LOG(0, "ERROR: cls_statelog_list: could not decode entry, index=%s", index.c_str());
     }
   }
 
-  if (iter == keys.end())
-    done = true;
-  else
+  if (ret.truncated) {
     ret.marker = marker;
+  }
 
-  ret.truncated = !done;
-
-  ::encode(ret, *out);
+  encode(ret, *out);
 
   return 0;
 }
@@ -229,7 +211,7 @@ static int cls_statelog_remove(cls_method_context_t hctx, bufferlist *in, buffer
 
   cls_statelog_remove_op op;
   try {
-    ::decode(op, in_iter);
+    decode(op, in_iter);
   } catch (buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_statelog_remove_op(): failed to decode op");
     return -EINVAL;
@@ -268,7 +250,7 @@ static int cls_statelog_check_state(cls_method_context_t hctx, bufferlist *in, b
 
   cls_statelog_check_state_op op;
   try {
-    ::decode(op, in_iter);
+    decode(op, in_iter);
   } catch (buffer::error& err) {
     CLS_LOG(1, "ERROR: cls_statelog_check_state_op(): failed to decode op");
     return -EINVAL;
@@ -279,19 +261,10 @@ static int cls_statelog_check_state(cls_method_context_t hctx, bufferlist *in, b
     return -EINVAL;
   }
 
-  string obj_index;
-  get_index_by_object(op.object, op.op_id, obj_index);
-
-  bufferlist bl;
-  int rc = cls_cxx_map_get_val(hctx, obj_index, &bl);
-  if (rc < 0) {
-    CLS_LOG(0, "could not find entry %s", obj_index.c_str());
-    return rc;
-  }
 
   cls_statelog_entry entry;
 
-  rc = get_existing_entry(hctx, op.client_id, op.op_id, op.object, entry);
+  int rc = get_existing_entry(hctx, op.client_id, op.op_id, op.object, entry);
   if (rc < 0)
     return rc;
 
@@ -301,9 +274,15 @@ static int cls_statelog_check_state(cls_method_context_t hctx, bufferlist *in, b
   return 0;
 }
 
-void __cls_init()
+CLS_INIT(statelog)
 {
   CLS_LOG(1, "Loaded log class!");
+
+  cls_handle_t h_class;
+  cls_method_handle_t h_statelog_add;
+  cls_method_handle_t h_statelog_list;
+  cls_method_handle_t h_statelog_remove;
+  cls_method_handle_t h_statelog_check_state;
 
   cls_register("statelog", &h_class);
 

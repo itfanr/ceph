@@ -37,6 +37,8 @@ class JournalTool : public MDSUtility
     // Bit hacky, use this `rank` member to control behaviour of the
     // various main_ functions.
     mds_rank_t rank;
+   
+    std::string type;
 
     // Entry points
     int main_journal(std::vector<const char*> &argv);
@@ -56,14 +58,17 @@ class JournalTool : public MDSUtility
 
     // I/O handles
     librados::Rados rados;
-    librados::IoCtx io;
+    librados::IoCtx input;
+    librados::IoCtx output;
+
+    bool other_pool;
 
     // Metadata backing store manipulation
-    int scavenge_dentries(
+    int read_lost_found(std::set<std::string> &lost);
+    int recover_dentries(
         EMetaBlob const &metablob,
         bool const dry_run,
         std::set<inodeno_t> *consumed_inos);
-    int replay_offline(EMetaBlob const &metablob, bool const dry_run);
 
     // Splicing
     int erase_region(JournalScanner const &jp, uint64_t const pos, uint64_t const length);
@@ -75,10 +80,12 @@ class JournalTool : public MDSUtility
         bufferlist *out_bl);
     int consume_inos(const std::set<inodeno_t> &inos);
 
+    //validate type
+    int validate_type(const std::string &type);
   public:
     void usage();
     JournalTool() :
-      rank(0) {}
+      rank(0), other_pool(false) {}
     int main(std::vector<const char*> &argv);
 };
 

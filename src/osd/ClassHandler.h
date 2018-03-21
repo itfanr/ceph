@@ -1,3 +1,5 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// vim: ts=8 sw=2 smarttab
 #ifndef CEPH_CLASSHANDLER_H
 #define CEPH_CLASSHANDLER_H
 
@@ -34,7 +36,7 @@ public:
   };
 
   struct ClassFilter {
-    struct ClassHandler::ClassData *cls;
+    struct ClassHandler::ClassData *cls = nullptr;
     std::string name;
     cls_cxx_filter_factory_t fn;
 
@@ -57,7 +59,7 @@ public:
     ClassHandler *handler;
     void *handle;
 
-    bool whitelisted;
+    bool whitelisted = false;
 
     map<string, ClassMethod> methods_map;
     map<string, ClassFilter> filters_map;
@@ -100,7 +102,6 @@ public:
   };
 
 private:
-  Mutex mutex;
   map<string, ClassData> classes;
 
   ClassData *_get_class(const string& cname, bool check_allowed);
@@ -110,10 +111,13 @@ private:
       const std::string& list);
 
 public:
+  Mutex mutex;
+
   explicit ClassHandler(CephContext *cct_) : cct(cct_), mutex("ClassHandler") {}
-  
+
   int open_all_classes();
 
+  void add_embedded_class(const string& cname);
   int open_class(const string& cname, ClassData **pcls);
   
   ClassData *register_class(const char *cname);

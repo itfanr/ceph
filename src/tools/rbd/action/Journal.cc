@@ -111,10 +111,12 @@ static int do_show_journal_status(librados::IoCtx& io_ctx,
     f->open_object_section("status");
     f->dump_unsigned("minimum_set", minimum_set);
     f->dump_unsigned("active_set", active_set);
-    f->open_object_section("registered_clients");
+    f->open_array_section("registered_clients");
     for (std::set<cls::journal::Client>::iterator c =
           registered_clients.begin(); c != registered_clients.end(); ++c) {
+      f->open_object_section("client");
       c->dump(f);
+      f->close_section();
     }
     f->close_section();
     f->close_section();
@@ -315,13 +317,13 @@ protected:
     JournalPlayer *journal;
     explicit ReplayHandler(JournalPlayer *_journal) : journal(_journal) {}
 
-    virtual void get() {}
-    virtual void put() {}
+    void get() override {}
+    void put() override {}
 
-    virtual void handle_entries_available() {
+    void handle_entries_available() override {
       journal->handle_replay_ready();
     }
-    virtual void handle_complete(int r) {
+    void handle_complete(int r) override {
       journal->handle_replay_complete(r);
     }
   };
@@ -362,7 +364,7 @@ static int inspect_entry(bufferlist& data,
 			 bool verbose) {
   try {
     bufferlist::iterator it = data.begin();
-    ::decode(event_entry, it);
+    decode(event_entry, it);
   } catch (const buffer::error &err) {
     std::cerr << "failed to decode event entry: " << err.what() << std::endl;
     return -EINVAL;
@@ -386,7 +388,7 @@ public:
     m_s() {
   }
 
-  int exec() {
+  int exec() override {
     int r = JournalPlayer::exec();
     m_s.print();
     return r;
@@ -407,7 +409,7 @@ private:
   };
 
   int process_entry(::journal::ReplayEntry replay_entry,
-		    uint64_t tag_id) {
+		    uint64_t tag_id) override {
     m_s.total++;
     if (m_verbose) {
       std::cout << "Entry: tag_id=" << tag_id << ", commit_tid="
@@ -484,7 +486,7 @@ public:
     m_s() {
   }
 
-  int exec() {
+  int exec() override {
     std::string header("# journal_id: " + m_journal_id + "\n");
     int r;
     r = safe_write(m_fd, header.c_str(), header.size());
@@ -512,7 +514,7 @@ private:
   };
 
   int process_entry(::journal::ReplayEntry replay_entry,
-		    uint64_t tag_id) {
+		    uint64_t tag_id) override {
     m_s.total++;
     int type = -1;
     bufferlist entry = replay_entry.get_data();
@@ -672,7 +674,7 @@ public:
       return false;
     }
     if (r != entry_size) {
-      std::cerr << "rbd: error reading from stdin: trucated"
+      std::cerr << "rbd: error reading from stdin: truncated"
 		<< std::endl;
       r = -EINVAL;
       return false;
@@ -808,7 +810,8 @@ void get_info_arguments(po::options_description *positional,
   at::add_format_options(options);
 }
 
-int execute_info(const po::variables_map &vm) {
+int execute_info(const po::variables_map &vm,
+                 const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string journal_name;
@@ -846,7 +849,8 @@ void get_status_arguments(po::options_description *positional,
   at::add_format_options(options);
 }
 
-int execute_status(const po::variables_map &vm) {
+int execute_status(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string journal_name;
@@ -882,7 +886,8 @@ void get_reset_arguments(po::options_description *positional,
   at::add_journal_spec_options(positional, options, at::ARGUMENT_MODIFIER_NONE);
 }
 
-int execute_reset(const po::variables_map &vm) {
+int execute_reset(const po::variables_map &vm,
+                  const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string journal_name;
@@ -915,7 +920,8 @@ void get_client_disconnect_arguments(po::options_description *positional,
      "client ID (or leave unspecified to disconnect all)");
 }
 
-int execute_client_disconnect(const po::variables_map &vm) {
+int execute_client_disconnect(const po::variables_map &vm,
+                              const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string journal_name;
@@ -952,7 +958,8 @@ void get_inspect_arguments(po::options_description *positional,
   at::add_verbose_option(options);
 }
 
-int execute_inspect(const po::variables_map &vm) {
+int execute_inspect(const po::variables_map &vm,
+                    const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string journal_name;
@@ -987,7 +994,8 @@ void get_export_arguments(po::options_description *positional,
   at::add_no_error_option(options);
 }
 
-int execute_export(const po::variables_map &vm) {
+int execute_export(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   size_t arg_index = 0;
   std::string pool_name;
   std::string journal_name;
@@ -998,7 +1006,7 @@ int execute_export(const po::variables_map &vm) {
   }
 
   std::string path;
-  r = utils::get_path(vm, utils::get_positional_argument(vm, 1), &path);
+  r = utils::get_path(vm, &arg_index, &path);
   if (r < 0) {
     return r;
   }
@@ -1028,14 +1036,15 @@ void get_import_arguments(po::options_description *positional,
   at::add_no_error_option(options);
 }
 
-int execute_import(const po::variables_map &vm) {
+int execute_import(const po::variables_map &vm,
+                   const std::vector<std::string> &ceph_global_init_args) {
   std::string path;
-  int r = utils::get_path(vm, utils::get_positional_argument(vm, 0), &path);
+  size_t arg_index = 0;
+  int r = utils::get_path(vm, &arg_index, &path);
   if (r < 0) {
     return r;
   }
 
-  size_t arg_index = 1;
   std::string pool_name;
   std::string journal_name;
   r = utils::get_pool_journal_names(vm, at::ARGUMENT_MODIFIER_DEST,

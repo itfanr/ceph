@@ -39,6 +39,7 @@
 #include "common/errno.h"
 #include "common/config.h"
 #include "common/sync_filesystem.h"
+#include "common/blkdev.h"
 
 #include "common/SloppyCRCMap.h"
 #include "os/filestore/chain_xattr.h"
@@ -46,6 +47,7 @@
 #define SLOPPY_CRC_XATTR "user.cephos.scrc"
 
 
+#define dout_context cct()
 #define dout_subsys ceph_subsys_filestore
 #undef dout_prefix
 #define dout_prefix *_dout << "genericfilestorebackend(" << get_basedir_path() << ") "
@@ -59,10 +61,54 @@ GenericFileStoreBackend::GenericFileStoreBackend(FileStore *fs):
   ioctl_fiemap(false),
   seek_data_hole(false),
   use_splice(false),
-  m_filestore_fiemap(g_conf->filestore_fiemap),
-  m_filestore_seek_data_hole(g_conf->filestore_seek_data_hole),
-  m_filestore_fsync_flushes_journal_data(g_conf->filestore_fsync_flushes_journal_data),
-  m_filestore_splice(g_conf->filestore_splice) {}
+  m_filestore_fiemap(cct()->_conf->filestore_fiemap),
+  m_filestore_seek_data_hole(cct()->_conf->filestore_seek_data_hole),
+  m_filestore_fsync_flushes_journal_data(cct()->_conf->filestore_fsync_flushes_journal_data),
+  m_filestore_splice(cct()->_conf->filestore_splice)
+{
+  // rotational?
+  {
+    // NOTE: the below won't work on btrfs; we'll assume rotational.
+    string fn = get_basedir_path();
+    int fd = ::open(fn.c_str(), O_RDONLY);
+    if (fd < 0) {
+      return;
+    }
+    char partition[PATH_MAX], devname[PATH_MAX];
+    int r = get_device_by_fd(fd, partition, devname, sizeof(devname));
+    if (r < 0) {
+      dout(1) << "unable to get device name for " << get_basedir_path() << ": "
+	      << cpp_strerror(r) << dendl;
+      m_rotational = true;
+    } else {
+      m_rotational = block_device_is_rotational(devname);
+      dout(20) << __func__ << " devname " << devname
+	       << " rotational " << (int)m_rotational << dendl;
+    }
+    ::close(fd);
+  }
+  // journal rotational?
+  {
+    // NOTE: the below won't work on btrfs; we'll assume rotational.
+    string fn = get_journal_path();
+    int fd = ::open(fn.c_str(), O_RDONLY);
+    if (fd < 0) {
+      return;
+    }
+    char partition[PATH_MAX], devname[PATH_MAX];
+    int r = get_device_by_fd(fd, partition, devname, sizeof(devname));
+    if (r < 0) {
+      dout(1) << "unable to get journal device name for "
+              << get_journal_path() << ": " << cpp_strerror(r) << dendl;
+      m_journal_rotational = true;
+    } else {
+      m_journal_rotational = block_device_is_rotational(devname);
+      dout(20) << __func__ << " journal devname " << devname
+               << " journal rotational " << (int)m_journal_rotational << dendl;
+    }
+    ::close(fd);
+  }
+}
 
 int GenericFileStoreBackend::detect_features()
 {
@@ -285,7 +331,7 @@ int GenericFileStoreBackend::do_fiemap(int fd, off_t start, size_t len, struct f
   fiemap->fm_length = len + start % CEPH_PAGE_SIZE;
   fiemap->fm_flags = FIEMAP_FLAG_SYNC; /* flush extents to disk if needed */
 
-#if defined(DARWIN) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
   ret = -ENOTSUP;
   goto done_err;
 #else
@@ -309,7 +355,7 @@ int GenericFileStoreBackend::do_fiemap(int fd, off_t start, size_t len, struct f
   fiemap->fm_extent_count = fiemap->fm_mapped_extents;
   fiemap->fm_mapped_extents = 0;
 
-#if defined(DARWIN) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
   ret = -ENOTSUP;
   goto done_err;
 #else
@@ -351,7 +397,7 @@ int GenericFileStoreBackend::_crc_load_or_init(int fd, SloppyCRCMap *cm)
   bl.append(std::move(bp));
   bufferlist::iterator p = bl.begin();
   try {
-    ::decode(*cm, p);
+    decode(*cm, p);
   }
   catch (buffer::error &e) {
     r = -EIO;
@@ -364,7 +410,7 @@ int GenericFileStoreBackend::_crc_load_or_init(int fd, SloppyCRCMap *cm)
 int GenericFileStoreBackend::_crc_save(int fd, SloppyCRCMap *cm)
 {
   bufferlist bl;
-  ::encode(*cm, bl);
+  encode(*cm, bl);
   int r = chain_fsetxattr(fd, SLOPPY_CRC_XATTR, bl.c_str(), bl.length());
   if (r < 0)
     derr << __func__ << " got " << cpp_strerror(r) << dendl;

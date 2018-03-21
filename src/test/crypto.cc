@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <time.h>
 
+#include "gtest/gtest.h"
 #include "include/types.h"
 #include "auth/Crypto.h"
 #include "common/Clock.h"
@@ -8,11 +9,9 @@
 #include "common/ceph_context.h"
 #include "global/global_context.h"
 
-#include "test/unit.h"
-
 class CryptoEnvironment: public ::testing::Environment {
 public:
-  void SetUp() {
+  void SetUp() override {
     ceph::crypto::init(g_ceph_context);
   }
 };
@@ -72,6 +71,8 @@ TEST(AES, Encrypt) {
   int err;
   err = memcmp(cipher_s, want_cipher, sizeof(want_cipher));
   ASSERT_EQ(0, err);
+
+  delete kh;
 }
 
 TEST(AES, Decrypt) {
@@ -110,22 +111,21 @@ TEST(AES, Decrypt) {
   int err;
   err = memcmp(plaintext_s, want_plaintext, sizeof(want_plaintext));
   ASSERT_EQ(0, err);
+
+  delete kh;
 }
 
 TEST(AES, Loop) {
-  int err;
+  CryptoRandom random;
 
-  char secret_s[16];
-  err = get_random_bytes(secret_s, sizeof(secret_s));
-  ASSERT_EQ(0, err);
-  bufferptr secret(secret_s, sizeof(secret_s));
+  bufferptr secret(16);
+  random.get_bytes(secret.c_str(), secret.length());
 
-  char orig_plaintext_s[1024];
-  err = get_random_bytes(orig_plaintext_s, sizeof(orig_plaintext_s));
-  ASSERT_EQ(0, err);
+  bufferptr orig_plaintext(256);
+  random.get_bytes(orig_plaintext.c_str(), orig_plaintext.length());
 
   bufferlist plaintext;
-  plaintext.append(orig_plaintext_s, sizeof(orig_plaintext_s));
+  plaintext.append(orig_plaintext.c_str(), orig_plaintext.length());
 
   for (int i=0; i<10000; i++) {
     bufferlist cipher;
@@ -137,6 +137,8 @@ TEST(AES, Loop) {
       int r = kh->encrypt(plaintext, cipher, &error);
       ASSERT_EQ(r, 0);
       ASSERT_EQ(error, "");
+
+      delete kh;
     }
     plaintext.clear();
 
@@ -147,26 +149,28 @@ TEST(AES, Loop) {
       int r = ckh->decrypt(cipher, plaintext, &error);
       ASSERT_EQ(r, 0);
       ASSERT_EQ(error, "");
+
+      delete ckh;
     }
   }
 
-  char plaintext_s[sizeof(orig_plaintext_s)];
-  plaintext.copy(0, sizeof(plaintext_s), &plaintext_s[0]);
-  err = memcmp(plaintext_s, orig_plaintext_s, sizeof(orig_plaintext_s));
-  ASSERT_EQ(0, err);
+  bufferlist orig;
+  orig.append(orig_plaintext);
+  ASSERT_EQ(orig, plaintext);
 }
 
 TEST(AES, LoopKey) {
+  CryptoRandom random;
   bufferptr k(16);
-  get_random_bytes(k.c_str(), k.length());
-  CryptoKey key(CEPH_CRYPTO_AES, ceph_clock_now(NULL), k);
+  random.get_bytes(k.c_str(), k.length());
+  CryptoKey key(CEPH_CRYPTO_AES, ceph_clock_now(), k);
 
   bufferlist data;
   bufferptr r(128);
-  get_random_bytes(r.c_str(), r.length());
+  random.get_bytes(r.c_str(), r.length());
   data.append(r);
 
-  utime_t start = ceph_clock_now(NULL);
+  utime_t start = ceph_clock_now();
   int n = 100000;
 
   for (int i=0; i<n; ++i) {
@@ -176,7 +180,7 @@ TEST(AES, LoopKey) {
     ASSERT_EQ(r, 0);
   }
 
-  utime_t end = ceph_clock_now(NULL);
+  utime_t end = ceph_clock_now();
   utime_t dur = end - start;
   cout << n << " encoded in " << dur << std::endl;
 }

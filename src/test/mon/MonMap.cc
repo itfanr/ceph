@@ -15,10 +15,10 @@
 #include "common/ceph_context.h"
 #include "common/dns_resolve.h"
 #include "test/common/dns_messages.h"
-#include "test/unit.h"
 
 #include "common/debug.h"
 #include "gmock/gmock.h"
+#include "gtest/gtest.h"
 
 #include <sstream>
 
@@ -97,7 +97,7 @@ TEST_F(MonMapTest, build_initial_config_from_dns) {
 
 
   CephContext *cct = (new CephContext(CEPH_ENTITY_TYPE_MON))->get();
-  cct->_conf->set_val("mon_dns_srv_name", "cephmon", false);
+  cct->_conf->set_val("mon_dns_srv_name", "cephmon");
   MonMap monmap;
   int r = monmap.build_initial(cct, std::cerr);
 
@@ -195,7 +195,7 @@ TEST_F(MonMapTest, build_initial_config_from_dns_with_domain) {
 
 
   CephContext *cct = (new CephContext(CEPH_ENTITY_TYPE_MON))->get();
-  cct->_conf->set_val("mon_dns_srv_name", "cephmon_ceph.com", false);
+  cct->_conf->set_val("mon_dns_srv_name", "cephmon_ceph.com");
   MonMap monmap;
   int r = monmap.build_initial(cct, std::cerr);
 

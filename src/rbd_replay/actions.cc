@@ -18,9 +18,9 @@
 #include "PendingIO.hpp"
 #include "rbd_replay_debug.hpp"
 
+#define dout_context g_ceph_context
 
 using namespace rbd_replay;
-using namespace std;
 
 namespace {
 

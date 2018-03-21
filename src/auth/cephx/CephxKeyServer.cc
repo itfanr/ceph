@@ -34,12 +34,12 @@ bool KeyServerData::get_service_secret(CephContext *cct, uint32_t service_id,
   const RotatingSecrets& secrets = iter->second;
 
   // second to oldest, unless it's expired
-  map<uint64_t, ExpiringCryptoKey>::const_iterator riter = 
+  map<uint64_t, ExpiringCryptoKey>::const_iterator riter =
 	secrets.secrets.begin();
   if (secrets.secrets.size() > 1)
     ++riter;
 
-  if (riter->second.expiration < ceph_clock_now(cct))
+  if (riter->second.expiration < ceph_clock_now())
     ++riter;   // "current" key has expired, use "next" key instead
 
   secret_id = riter->first;
@@ -162,7 +162,7 @@ bool KeyServer::_check_rotating_secrets()
     ldout(cct, 10) << __func__ << " added " << added << dendl;
     data.rotating_ver++;
     //data.next_rotating_time = ceph_clock_now(cct);
-    //data.next_rotating_time += MIN(cct->_conf->auth_mon_ticket_ttl, cct->_conf->auth_service_ticket_ttl);
+    //data.next_rotating_time += std::min(cct->_conf->auth_mon_ticket_ttl, cct->_conf->auth_service_ticket_ttl);
     _dump_rotating_secrets();
     return true;
   }
@@ -189,7 +189,7 @@ int KeyServer::_rotate_secret(uint32_t service_id)
 {
   RotatingSecrets& r = data.rotating_secrets[service_id];
   int added = 0;
-  utime_t now = ceph_clock_now(cct);
+  utime_t now = ceph_clock_now();
   double ttl = service_id == CEPH_ENTITY_TYPE_AUTH ? cct->_conf->auth_mon_ticket_ttl : cct->_conf->auth_service_ticket_ttl;
 
   while (r.need_new_secrets(now)) {
@@ -200,7 +200,7 @@ int KeyServer::_rotate_secret(uint32_t service_id)
     } else {
       utime_t next_ttl = now;
       next_ttl += ttl;
-      ek.expiration = MAX(next_ttl, r.next().expiration);
+      ek.expiration = std::max(next_ttl, r.next().expiration);
     }
     ek.expiration += ttl;
     uint64_t secret_id = r.add(ek);
@@ -264,10 +264,10 @@ bool KeyServer::generate_secret(CryptoKey& secret)
   if (!crypto)
     return false;
 
-  if (crypto->create(bp) < 0)
+  if (crypto->create(cct->random(), bp) < 0)
     return false;
 
-  secret.set_secret(CEPH_CRYPTO_AES, bp, ceph_clock_now(NULL));
+  secret.set_secret(CEPH_CRYPTO_AES, bp, ceph_clock_now());
 
   return true;
 }
@@ -329,7 +329,8 @@ int KeyServer::encode_secrets(Formatter *f, stringstream *ds) const
       bufferlist *bl = const_cast<bufferlist*>(&capsiter->second);
       bufferlist::iterator dataiter = bl->begin();
       string caps;
-      ::decode(caps, dataiter);
+      using ceph::decode;
+      decode(caps, dataiter);
       if (ds)
         *ds << "\tcaps: [" << capsiter->first << "] " << caps << std::endl;
       if (f)
@@ -426,7 +427,7 @@ int KeyServer::_build_session_auth_info(uint32_t service_id, CephXServiceTicketI
 {
   info.service_id = service_id;
   info.ticket = auth_ticket_info.ticket;
-  info.ticket.init_timestamps(ceph_clock_now(cct), cct->_conf->auth_service_ticket_ttl);
+  info.ticket.init_timestamps(ceph_clock_now(), cct->_conf->auth_service_ticket_ttl);
 
   generate_secret(info.session_key);
 

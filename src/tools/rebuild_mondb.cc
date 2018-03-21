@@ -46,12 +46,12 @@ static void add_auth(KeyServerData::Incremental& auth_inc,
 {
   AuthMonitor::Incremental inc;
   inc.inc_type = AuthMonitor::AUTH_DATA;
-  ::encode(auth_inc, inc.auth_data);
+  encode(auth_inc, inc.auth_data);
   inc.auth_type = CEPH_AUTH_CEPHX;
 
   bufferlist bl;
   __u8 v = 1;
-  ::encode(v, bl);
+  encode(v, bl);
   inc.encode(bl, CEPH_FEATURES_ALL);
 
   const string prefix("auth");
@@ -100,7 +100,7 @@ static int get_auth_inc(const string& keyring_path,
     }
     auto bp = bl.begin();
     try {
-      ::decode(keyring, bp);
+      decode(keyring, bp);
     } catch (const buffer::error& e) {
       cerr << "error decoding keyring: " << keyring_path << std::endl;
       return -EINVAL;
@@ -122,8 +122,8 @@ static int get_auth_inc(const string& keyring_path,
     // fallback to default caps for an OSD
     //   osd 'allow *' mon 'allow rwx'
     // as suggested by document.
-    ::encode(string("allow *"), caps["osd"]);
-    ::encode(string("allow rwx"), caps["mon"]);
+    encode(string("allow *"), caps["osd"]);
+    encode(string("allow rwx"), caps["mon"]);
   } else {
     caps = new_inc.caps;
   }
@@ -187,7 +187,7 @@ int update_monitor(const OSDSuperblock& sb, MonitorDBStore& ms)
   case 0:
     return 0;
   default:
-    assert(0);
+    ceph_abort();
   }
   string uuid = stringify(sb.cluster_fsid) + "\n";
   bufferlist bl;
@@ -223,16 +223,26 @@ int update_osdmap(ObjectStore& fs, OSDSuperblock& sb, MonitorDBStore& ms)
     t->erase(prefix, ms.combine_strings("full", e));
     ntrimmed++;
   }
-  if (!t->empty()) {
-    t->put(prefix, first_committed_name, sb.oldest_map);
+  // make sure we have a non-zero first_committed. OSDMonitor relies on this.
+  // because PaxosService::put_last_committed() set it to last_committed, if it
+  // is zero. which breaks OSDMonitor::update_from_paxos(), in which we believe
+  // that latest_full should always be greater than last_committed.
+  if (first_committed == 0 && sb.oldest_map < sb.newest_map) {
+    first_committed = 1;
+  } else if (ntrimmed) {
+    first_committed += ntrimmed;
+  }
+  if (first_committed) {
+    t->put(prefix, first_committed_name, first_committed);
     ms.apply_transaction(t);
     t = make_shared<MonitorDBStore::Transaction>();
   }
 
   unsigned nadded = 0;
 
+  auto ch = fs.open_collection(coll_t::meta());
   OSDMap osdmap;
-  for (auto e = max(last_committed+1, sb.oldest_map);
+  for (auto e = std::max(last_committed+1, sb.oldest_map);
        e <= sb.newest_map; e++) {
     bool have_crc = false;
     uint32_t crc = -1;
@@ -241,7 +251,7 @@ int update_osdmap(ObjectStore& fs, OSDSuperblock& sb, MonitorDBStore& ms)
     {
       const auto oid = OSD::get_inc_osdmap_pobject_name(e);
       bufferlist bl;
-      int nread = fs.read(coll_t::meta(), oid, 0, 0, bl);
+      int nread = fs.read(ch, oid, 0, 0, bl);
       if (nread <= 0) {
         cerr << "missing " << oid << std::endl;
         return -EINVAL;
@@ -276,7 +286,7 @@ int update_osdmap(ObjectStore& fs, OSDSuperblock& sb, MonitorDBStore& ms)
     {
       const auto oid = OSD::get_osdmap_pobject_name(e);
       bufferlist bl;
-      int nread = fs.read(coll_t::meta(), oid, 0, 0, bl);
+      int nread = fs.read(ch, oid, 0, 0, bl);
       if (nread <= 0) {
         cerr << "missing " << oid << std::endl;
         return -EINVAL;
@@ -332,52 +342,6 @@ int update_osdmap(ObjectStore& fs, OSDSuperblock& sb, MonitorDBStore& ms)
 }
 
 // rebuild
-//  - pgmap_meta/version
-//  - pgmap_meta/last_osdmap_epoch
-//  - pgmap_meta/last_pg_scan
-//  - pgmap_meta/full_ratio
-//  - pgmap_meta/nearfull_ratio
-//  - pgmap_meta/stamp
-int update_pgmap_meta(MonitorDBStore& st)
-{
-  const string prefix("pgmap_meta");
-  auto t = make_shared<MonitorDBStore::Transaction>();
-  // stolen from PGMonitor::create_pending()
-  // the first pgmap_meta
-  t->put(prefix, "version", 1);
-  {
-    auto stamp = ceph_clock_now(g_ceph_context);
-    bufferlist bl;
-    ::encode(stamp, bl);
-    t->put(prefix, "stamp", bl);
-  }
-  {
-    auto last_osdmap_epoch = st.get("osdmap", "last_committed");
-    t->put(prefix, "last_osdmap_epoch", last_osdmap_epoch);
-  }
-  // be conservative, so PGMonitor will scan the all pools for pg changes
-  t->put(prefix, "last_pg_scan", 1);
-  {
-    auto full_ratio = g_ceph_context->_conf->mon_osd_full_ratio;
-    if (full_ratio > 1.0)
-      full_ratio /= 100.0;
-    bufferlist bl;
-    ::encode(full_ratio, bl);
-    t->put(prefix, "full_ratio", bl);
-  }
-  {
-    auto nearfull_ratio = g_ceph_context->_conf->mon_osd_nearfull_ratio;
-    if (nearfull_ratio > 1.0)
-      nearfull_ratio /= 100.0;
-    bufferlist bl;
-    ::encode(nearfull_ratio, bl);
-    t->put(prefix, "nearfull_ratio", bl);
-  }
-  st.apply_transaction(t);
-  return 0;
-}
-
-// rebuild
 //  - pgmap_pg/${pgid}
 int update_pgmap_pg(ObjectStore& fs, MonitorDBStore& ms)
 {
@@ -399,30 +363,30 @@ int update_pgmap_pg(ObjectStore& fs, MonitorDBStore& ms)
     spg_t pgid;
     if (!coll.is_pg(&pgid))
       continue;
-    bufferlist bl;
     pg_info_t info(pgid);
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
     __u8 struct_v;
-    r = PG::read_info(&fs, pgid, coll, bl, info, past_intervals, struct_v);
+    r = PG::read_info(&fs, pgid, coll, info, past_intervals, struct_v);
     if (r < 0) {
       cerr << "failed to read_info: " << cpp_strerror(r) << std::endl;
       return r;
     }
-    if (struct_v < PG::cur_struct_v) {
+    if (struct_v < PG::get_latest_struct_v()) {
       cerr << "incompatible pg_info: v" << struct_v << std::endl;
       return -EINVAL;
     }
     version_t latest_epoch = 0;
+    bufferlist bl;
     r = ms.get(prefix, stringify(pgid.pgid), bl);
     if (r >= 0) {
       pg_stat_t pg_stat;
       auto bp = bl.begin();
-      ::decode(pg_stat, bp);
+      decode(pg_stat, bp);
       latest_epoch = pg_stat.reported_epoch;
     }
     if (info.stats.reported_epoch > latest_epoch) {
       bufferlist bl;
-      ::encode(info.stats, bl);
+      encode(info.stats, bl);
       t->put(prefix, stringify(pgid.pgid), bl);
       npg++;
     }

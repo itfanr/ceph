@@ -4,6 +4,7 @@
 #include "librbd/object_map/ResizeRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
+#include "osdc/Striper.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ObjectMap.h"
 #include "cls/lock/cls_lock_client.h"
@@ -19,8 +20,12 @@ void ResizeRequest::resize(ceph::BitVector<2> *object_map, uint64_t num_objs,
                            uint8_t default_state) {
   size_t orig_object_map_size = object_map->size();
   object_map->resize(num_objs);
-  for (uint64_t i = orig_object_map_size; i < object_map->size(); ++i) {
-    (*object_map)[i] = default_state;
+  if (num_objs > orig_object_map_size) {
+    auto it = object_map->begin() + orig_object_map_size;
+    auto end_it = object_map->begin() + num_objs;
+    for (;it != end_it; ++it) {
+      *it = default_state;
+    }
   }
 }
 
@@ -30,7 +35,7 @@ void ResizeRequest::send() {
   RWLock::WLocker l(m_image_ctx.object_map_lock);
   m_num_objs = Striper::get_num_objects(m_image_ctx.layout, m_new_size);
 
-  std::string oid(ObjectMap::object_map_name(m_image_ctx.id, m_snap_id));
+  std::string oid(ObjectMap<>::object_map_name(m_image_ctx.id, m_snap_id));
   ldout(cct, 5) << this << " resizing on-disk object map: "
                 << "ictx=" << &m_image_ctx << ", "
                 << "oid=" << oid << ", num_objs=" << m_num_objs << dendl;
@@ -48,10 +53,12 @@ void ResizeRequest::send() {
 }
 
 void ResizeRequest::finish_request() {
-  CephContext *cct = m_image_ctx.cct;
+  RWLock::WLocker object_map_locker(m_image_ctx.object_map_lock);
 
+  CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " resizing in-memory object map: "
 		<< m_num_objs << dendl;
+
   resize(m_object_map, m_num_objs, m_default_object_state);
 }
 

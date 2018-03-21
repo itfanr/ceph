@@ -54,7 +54,7 @@ void RGWRealmWatcher::handle_notify(uint64_t notify_id, uint64_t cookie,
     auto p = bl.begin();
     while (!p.end()) {
       RGWRealmNotify notify;
-      ::decode(notify, p);
+      decode(notify, p);
       auto watcher = watchers.find(notify);
       if (watcher == watchers.end()) {
         lderr(cct) << "Failed to find a watcher for notify type "
@@ -96,8 +96,8 @@ int RGWRealmWatcher::watch_start(RGWRealm& realm)
   }
 
   // open an IoCtx for the realm's pool
-  auto pool = realm.get_pool_name(cct);
-  r = rados.ioctx_create(pool.c_str(), pool_ctx);
+  rgw_pool pool(realm.get_pool(cct));
+  r = rgw_init_ioctx(&rados, pool, pool_ctx);
   if (r < 0) {
     lderr(cct) << "Failed to open pool " << pool
         << " with " << cpp_strerror(-r) << dendl;

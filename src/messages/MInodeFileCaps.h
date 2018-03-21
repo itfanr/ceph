@@ -18,7 +18,7 @@
 
 class MInodeFileCaps : public Message {
   inodeno_t ino;
-  __u32     caps;
+  __u32     caps = 0;
 
  public:
   inodeno_t get_ino() { return ino; }
@@ -31,22 +31,24 @@ class MInodeFileCaps : public Message {
     this->caps = caps;
   }
 private:
-  ~MInodeFileCaps() {}
+  ~MInodeFileCaps() override {}
 
 public:
-  const char *get_type_name() const { return "inode_file_caps";}
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "inode_file_caps";}
+  void print(ostream& out) const override {
     out << "inode_file_caps(" << ino << " " << ccap_string(caps) << ")";
   }
   
-  void encode_payload(uint64_t features) {
-    ::encode(ino, payload);
-    ::encode(caps, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(ino, payload);
+    encode(caps, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
+    using ceph::decode;
     bufferlist::iterator p = payload.begin();
-    ::decode(ino, p);
-    ::decode(caps, p);
+    decode(ino, p);
+    decode(caps, p);
   }
 };
 

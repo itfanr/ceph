@@ -7,8 +7,7 @@
 #include "rgw_period_pusher.h"
 #include "rgw_cr_rest.h"
 #include "common/errno.h"
-
-#include "rgw_boost_asio_yield.h"
+#include <boost/asio/yield.hpp>
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -135,10 +134,11 @@ class RGWPeriodPusher::CRThread {
            std::map<std::string, RGWRESTConn>&& conns)
     : coroutines(cct, NULL),
       http(cct, coroutines.get_completion_mgr()),
-      push_all(new PushAllCR(cct, &http, std::move(period), std::move(conns))),
-      thread([this] { coroutines.run(push_all.get()); })
+      push_all(new PushAllCR(cct, &http, std::move(period), std::move(conns)))
   {
     http.set_threaded();
+    // must spawn the CR thread after set_threaded
+    thread = std::thread([this] { coroutines.run(push_all.get()); });
   }
   ~CRThread()
   {
@@ -180,7 +180,7 @@ void RGWPeriodPusher::handle_notify(RGWRealmNotify type,
   // decode the period
   RGWZonesNeedPeriod info;
   try {
-    ::decode(info, p);
+    decode(info, p);
   } catch (buffer::error& e) {
     lderr(cct) << "Failed to decode the period: " << e.what() << dendl;
     return;

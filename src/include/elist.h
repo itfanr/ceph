@@ -39,9 +39,8 @@ public:
       assert(!is_on_list());
     }
 
-    // no copying!
-    item(const item& other);
-    const item& operator= (const item& right);
+    item(const item& other) = delete;
+    const item& operator= (const item& right) = delete;
 
     
     bool empty() const { return _prev == this; }
@@ -170,7 +169,7 @@ public:
       else if (mode == CACHE_NEXT)
 	cur = next;
       else
-	assert(0);
+	ceph_abort();
       next = cur->_next;
       return *this;
     }

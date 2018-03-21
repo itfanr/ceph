@@ -3,6 +3,7 @@
 
 #include "tools/rbd/ArgumentTypes.h"
 #include "tools/rbd/Shell.h"
+#include "tools/rbd/Utils.h"
 #include "include/rbd/features.h"
 #include "common/config.h"
 #include "common/strtol.h"
@@ -17,13 +18,16 @@ namespace argument_types {
 namespace po = boost::program_options;
 
 const std::map<uint64_t, std::string> ImageFeatures::FEATURE_MAPPING = {
-  {RBD_FEATURE_LAYERING, "layering"},
-  {RBD_FEATURE_STRIPINGV2, "striping"},
-  {RBD_FEATURE_EXCLUSIVE_LOCK, "exclusive-lock"},
-  {RBD_FEATURE_OBJECT_MAP, "object-map"},
-  {RBD_FEATURE_FAST_DIFF, "fast-diff"},
-  {RBD_FEATURE_DEEP_FLATTEN, "deep-flatten"},
-  {RBD_FEATURE_JOURNALING, "journaling"}};
+  {RBD_FEATURE_LAYERING, RBD_FEATURE_NAME_LAYERING},
+  {RBD_FEATURE_STRIPINGV2, RBD_FEATURE_NAME_STRIPINGV2},
+  {RBD_FEATURE_EXCLUSIVE_LOCK, RBD_FEATURE_NAME_EXCLUSIVE_LOCK},
+  {RBD_FEATURE_OBJECT_MAP, RBD_FEATURE_NAME_OBJECT_MAP},
+  {RBD_FEATURE_FAST_DIFF, RBD_FEATURE_NAME_FAST_DIFF},
+  {RBD_FEATURE_DEEP_FLATTEN, RBD_FEATURE_NAME_DEEP_FLATTEN},
+  {RBD_FEATURE_JOURNALING, RBD_FEATURE_NAME_JOURNALING},
+  {RBD_FEATURE_DATA_POOL, RBD_FEATURE_NAME_DATA_POOL},
+  {RBD_FEATURE_OPERATIONS, RBD_FEATURE_NAME_OPERATIONS},
+};
 
 Format::Formatter Format::create_formatter(bool pretty) const {
   if (value == "json") {
@@ -104,6 +108,17 @@ void add_image_option(po::options_description *opt,
     description = "destination " + description;
     break;
   }
+  description += desc_suffix;
+
+  // TODO add validator
+  opt->add_options()
+    (name.c_str(), po::value<std::string>(), description.c_str());
+}
+
+void add_image_id_option(po::options_description *opt,
+                         const std::string &desc_suffix) {
+  std::string name = IMAGE_ID;
+  std::string description = "image id";
   description += desc_suffix;
 
   // TODO add validator
@@ -200,13 +215,22 @@ void add_image_spec_options(po::options_description *pos,
 
 void add_group_spec_options(po::options_description *pos,
 			    po::options_description *opt,
-			    ArgumentModifier modifier) {
-  pos->add_options()
-    ((get_name_prefix(modifier) + GROUP_SPEC).c_str(),
-     (get_description_prefix(modifier) + "group specification\n" +
-      "(example: [<pool-name>/]<group-name>)").c_str());
+			    ArgumentModifier modifier,
+                            bool snap) {
   add_pool_option(opt, modifier);
   add_group_option(opt, modifier);
+  if (!snap) {
+    pos->add_options()
+      ((get_name_prefix(modifier) + GROUP_SPEC).c_str(),
+       (get_description_prefix(modifier) + "group specification\n" +
+         "(example: [<pool-name>/]<group-name>)").c_str());
+  } else {
+    add_snap_option(opt, modifier);
+    pos->add_options()
+      ((get_name_prefix(modifier) + GROUP_SNAP_SPEC).c_str(),
+       (get_description_prefix(modifier) + "group specification\n" +
+         "(example: [<pool-name>/]<group-name>@<snap-name>)").c_str());
+  }
 }
 
 void add_snap_spec_options(po::options_description *pos,
@@ -246,7 +270,6 @@ void add_journal_spec_options(po::options_description *pos,
   add_journal_option(opt, modifier);
 }
 
-
 void add_create_image_options(po::options_description *opt,
                               bool include_format) {
   // TODO get default image format from conf
@@ -267,7 +290,7 @@ void add_create_image_options(po::options_description *opt,
     (IMAGE_FEATURES.c_str(), po::value<ImageFeatures>()->composing(),
      ("image features\n" + get_short_features_help(true)).c_str())
     (IMAGE_SHARED.c_str(), po::bool_switch(), "shared image")
-    (IMAGE_STRIPE_UNIT.c_str(), po::value<uint64_t>(), "stripe unit")
+    (IMAGE_STRIPE_UNIT.c_str(), po::value<ImageObjectSize>(), "stripe unit in B/K/M")
     (IMAGE_STRIPE_COUNT.c_str(), po::value<uint64_t>(), "stripe count")
     (IMAGE_DATA_POOL.c_str(), po::value<std::string>(), "data pool");
 
@@ -287,7 +310,13 @@ void add_create_journal_options(po::options_description *opt) {
 void add_size_option(boost::program_options::options_description *opt) {
   opt->add_options()
     ((IMAGE_SIZE + ",s").c_str(), po::value<ImageSize>()->required(),
-     "image size (in M/G/T)");
+     "image size (in M/G/T) [default: M]");
+}
+
+void add_sparse_size_option(boost::program_options::options_description *opt) {
+  opt->add_options()
+    (IMAGE_SPARSE_SIZE.c_str(), po::value<ImageObjectSize>(),
+    "sparse size in B/K/M [default: 4K]");
 }
 
 void add_path_options(boost::program_options::options_description *pos,
@@ -313,7 +342,7 @@ void add_no_progress_option(boost::program_options::options_description *opt) {
 
 void add_format_options(boost::program_options::options_description *opt) {
   opt->add_options()
-    (FORMAT.c_str(), po::value<Format>(), "output format [plain, json, or xml]")
+    (FORMAT.c_str(), po::value<Format>(), "output format (plain, json, or xml) [default: plain]")
     (PRETTY_FORMAT.c_str(), po::bool_switch(),
      "pretty formatting (json and xml)");
 }
@@ -328,11 +357,24 @@ void add_no_error_option(boost::program_options::options_description *opt) {
     (NO_ERROR.c_str(), po::bool_switch(), "continue after error");
 }
 
+void add_export_format_option(boost::program_options::options_description *opt) {
+  opt->add_options()
+    ("export-format", po::value<ExportFormat>(), "format of image file");
+}
+
 std::string get_short_features_help(bool append_suffix) {
   std::ostringstream oss;
   bool first_feature = true;
   oss << "[";
   for (auto &pair : ImageFeatures::FEATURE_MAPPING) {
+    if ((pair.first & RBD_FEATURES_IMPLICIT_ENABLE) != 0ULL) {
+      // hide implicitly enabled features from list
+      continue;
+    } else if (!append_suffix && (pair.first & RBD_FEATURES_MUTABLE) == 0ULL) {
+      // hide non-mutable features for the 'rbd feature XYZ' command
+      continue;
+    }
+
     if (!first_feature) {
       oss << ", ";
     }
@@ -340,7 +382,7 @@ std::string get_short_features_help(bool append_suffix) {
 
     std::string suffix;
     if (append_suffix) {
-      if ((pair.first & g_conf->rbd_default_features) != 0) {
+      if ((pair.first & rbd::utils::get_rbd_default_features(g_ceph_context)) != 0) {
         suffix += "+";
       }
       if ((pair.first & RBD_FEATURES_MUTABLE) != 0) {
@@ -487,6 +529,30 @@ void validate(boost::any& v, const std::vector<std::string>& values,
     return;
   }
   throw po::validation_error(po::validation_error::invalid_option_value);
+}
+
+void validate(boost::any& v, const std::vector<std::string>& values,
+              ExportFormat *target_type, int) {
+  po::validators::check_first_occurrence(v);
+  const std::string &s = po::validators::get_single_string(values);
+
+  std::string parse_error;
+  uint64_t format = strict_sistrtoll(s.c_str(), &parse_error);
+  if (!parse_error.empty() || (format != 1 && format != 2)) {
+    throw po::validation_error(po::validation_error::invalid_option_value);
+  }
+
+  v = boost::any(format);
+}
+
+void validate(boost::any& v, const std::vector<std::string>& values,
+              Secret *target_type, int) {
+  std::cerr << "rbd: --secret is deprecated, use --keyfile" << std::endl;
+
+  po::validators::check_first_occurrence(v);
+  const std::string &s = po::validators::get_single_string(values);
+  g_conf->set_val_or_die("keyfile", s.c_str());
+  v = boost::any(s);
 }
 
 } // namespace argument_types

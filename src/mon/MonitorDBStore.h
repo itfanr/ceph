@@ -30,6 +30,8 @@
 #include "common/debug.h"
 #include "common/safe_io.h"
 
+#define dout_context g_ceph_context
+
 class MonitorDBStore
 {
   string path;
@@ -63,22 +65,22 @@ class MonitorDBStore
 
     void encode(bufferlist& encode_bl) const {
       ENCODE_START(2, 1, encode_bl);
-      ::encode(type, encode_bl);
-      ::encode(prefix, encode_bl);
-      ::encode(key, encode_bl);
-      ::encode(bl, encode_bl);
-      ::encode(endkey, encode_bl);
+      encode(type, encode_bl);
+      encode(prefix, encode_bl);
+      encode(key, encode_bl);
+      encode(bl, encode_bl);
+      encode(endkey, encode_bl);
       ENCODE_FINISH(encode_bl);
     }
 
     void decode(bufferlist::iterator& decode_bl) {
       DECODE_START(2, decode_bl);
-      ::decode(type, decode_bl);
-      ::decode(prefix, decode_bl);
-      ::decode(key, decode_bl);
-      ::decode(bl, decode_bl);
+      decode(type, decode_bl);
+      decode(prefix, decode_bl);
+      decode(key, decode_bl);
+      decode(bl, decode_bl);
       if (struct_v >= 2)
-	::decode(endkey, decode_bl);
+	decode(endkey, decode_bl);
       DECODE_FINISH(decode_bl);
     }
 
@@ -123,8 +125,9 @@ class MonitorDBStore
     }
 
     void put(string prefix, string key, version_t ver) {
+      using ceph::encode;
       bufferlist bl;
-      ::encode(ver, bl);
+      encode(ver, bl);
       put(prefix, key, bl);
     }
 
@@ -150,18 +153,18 @@ class MonitorDBStore
 
     void encode(bufferlist& bl) const {
       ENCODE_START(2, 1, bl);
-      ::encode(ops, bl);
-      ::encode(bytes, bl);
-      ::encode(keys, bl);
+      encode(ops, bl);
+      encode(bytes, bl);
+      encode(keys, bl);
       ENCODE_FINISH(bl);
     }
 
     void decode(bufferlist::iterator& bl) {
       DECODE_START(2, bl);
-      ::decode(ops, bl);
+      decode(ops, bl);
       if (struct_v >= 2) {
-	::decode(bytes, bl);
-	::decode(keys, bl);
+	decode(bytes, bl);
+	decode(keys, bl);
       }
       DECODE_FINISH(bl);
     }
@@ -184,7 +187,7 @@ class MonitorDBStore
     }
 
     void append_from_encoded(bufferlist& bl) {
-      TransactionRef other(new Transaction);
+      auto other(std::make_shared<Transaction>());
       bufferlist::iterator it = bl.begin();
       other->decode(it);
       append(other);
@@ -290,7 +293,7 @@ class MonitorDBStore
 	break;
       default:
 	derr << __func__ << " unknown op type " << op.type << dendl;
-	ceph_assert(0);
+	ceph_abort();
 	break;
       }
     }
@@ -318,7 +321,7 @@ class MonitorDBStore
 		    Context *f)
       : store(s), t(t), oncommit(f)
     {}
-    void finish(int r) {
+    void finish(int r) override {
       /* The store serializes writes.  Each transaction is handled
        * sequentially by the io_work Finisher.  If a transaction takes longer
        * to apply its state to permanent storage, then no other transaction
@@ -374,7 +377,7 @@ class MonitorDBStore
 			 string &key,
 			 bufferlist &value,
 			 uint64_t max) {
-      TransactionRef tmp(new Transaction);
+      auto tmp(std::make_shared<Transaction>());
       bufferlist tmp_bl;
       tmp->put(prefix, key, value);
       tmp->encode(tmp_bl);
@@ -393,9 +396,9 @@ class MonitorDBStore
       last_key.second = key;
 
       if (g_conf->mon_sync_debug) {
-	::encode(prefix, crc_bl);
-	::encode(key, crc_bl);
-	::encode(value, crc_bl);
+	encode(prefix, crc_bl);
+	encode(key, crc_bl);
+	encode(value, crc_bl);
       }
 
       return true;
@@ -432,7 +435,7 @@ class MonitorDBStore
 	sync_prefixes(prefixes)
     { }
 
-    virtual ~WholeStoreIteratorImpl() { }
+    ~WholeStoreIteratorImpl() override { }
 
     /**
      * Obtain a chunk of the store
@@ -443,7 +446,7 @@ class MonitorDBStore
      *			    differ from the one passed on to the function)
      * @param last_key[out] Last key in the chunk
      */
-    virtual void get_chunk_tx(TransactionRef tx, uint64_t max) {
+    void get_chunk_tx(TransactionRef tx, uint64_t max) override {
       assert(done == false);
       assert(iter->valid() == true);
 
@@ -461,7 +464,7 @@ class MonitorDBStore
       done = true;
     }
 
-    virtual pair<string,string> get_next_key() {
+    pair<string,string> get_next_key() override {
       assert(iter->valid());
 
       for (; iter->valid(); iter->next()) {
@@ -474,7 +477,7 @@ class MonitorDBStore
       return pair<string,string>();
     }
 
-    virtual bool _is_valid() {
+    bool _is_valid() override {
       return iter->valid();
     }
   };
@@ -482,7 +485,7 @@ class MonitorDBStore
   Synchronizer get_synchronizer(pair<string,string> &key,
 				set<string> &prefixes) {
     KeyValueDB::WholeSpaceIterator iter;
-    iter = db->get_iterator();
+    iter = db->get_wholespace_iterator();
 
     if (!key.first.empty() && !key.second.empty())
       iter->upper_bound(key.first, key.second);
@@ -503,7 +506,7 @@ class MonitorDBStore
 
   KeyValueDB::WholeSpaceIterator get_iterator() {
     KeyValueDB::WholeSpaceIterator iter;
-    iter = db->get_iterator();
+    iter = db->get_wholespace_iterator();
     iter->seek_to_first();
     return iter;
   }
@@ -536,7 +539,7 @@ class MonitorDBStore
     assert(bl.length());
     version_t ver;
     bufferlist::iterator p = bl.begin();
-    ::decode(ver, p);
+    decode(ver, p);
     return ver;
   }
 
@@ -622,18 +625,34 @@ class MonitorDBStore
       db->init(g_conf->mon_rocksdb_options);
     else
       db->init();
+
+
   }
 
   int open(ostream &out) {
     string kv_type;
     int r = read_meta("kv_backend", &kv_type);
-    if (r < 0 || kv_type.length() == 0)
+    if (r < 0 || kv_type.empty()) {
+      // assume old monitors that did not mark the type were leveldb.
       kv_type = "leveldb";
-
+      r = write_meta("kv_backend", kv_type);
+      if (r < 0)
+	return r;
+    }
     _open(kv_type);
     r = db->open(out);
     if (r < 0)
       return r;
+
+    // Monitors are few in number, so the resource cost of exposing 
+    // very detailed stats is low: ramp up the priority of all the
+    // KV store's perf counters.  Do this after open, because backend may
+    // not have constructed PerfCounters earlier.
+    if (db->get_perf_counters()) {
+      db->get_perf_counters()->set_prio_adjust(
+          PerfCountersBuilder::PRIO_USEFUL - PerfCountersBuilder::PRIO_DEBUGONLY);
+    }
+
     io_work.start();
     is_open = true;
     return 0;

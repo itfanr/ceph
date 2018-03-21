@@ -1,4 +1,4 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
 #include "test/librbd/test_mock_fixture.h"
@@ -86,7 +86,7 @@ public:
   void expect_object_map_load(MockObjectMapImageCtx &mock_image_ctx,
                               ceph::BitVector<2> *object_map, uint64_t snap_id,
                               int r) {
-    std::string oid(ObjectMap::object_map_name(mock_image_ctx.id, snap_id));
+    std::string oid(ObjectMap<>::object_map_name(mock_image_ctx.id, snap_id));
     auto &expect = EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
                                exec(oid, _, StrEq("rbd"), StrEq("object_map_load"), _, _, _));
     if (r < 0) {
@@ -96,7 +96,7 @@ public:
       object_map->set_crc_enabled(false);
 
       bufferlist bl;
-      ::encode(*object_map, bl);
+      encode(*object_map, bl);
 
       std::string str(bl.c_str(), bl.length());
       expect.WillOnce(DoAll(WithArg<5>(CopyInBufferlist(str)), Return(0)));
@@ -117,14 +117,16 @@ public:
   }
 
   void expect_truncate_request(MockObjectMapImageCtx &mock_image_ctx) {
-    std::string oid(ObjectMap::object_map_name(mock_image_ctx.id, TEST_SNAP_ID));
+    std::string oid(ObjectMap<>::object_map_name(mock_image_ctx.id,
+                                                 TEST_SNAP_ID));
     EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx), truncate(oid, 0, _))
                   .WillOnce(Return(0));
   }
 
   void expect_object_map_resize(MockObjectMapImageCtx &mock_image_ctx,
                                 uint64_t num_objects, int r) {
-    std::string oid(ObjectMap::object_map_name(mock_image_ctx.id, TEST_SNAP_ID));
+    std::string oid(ObjectMap<>::object_map_name(mock_image_ctx.id,
+                                                 TEST_SNAP_ID));
     auto &expect = EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
                                exec(oid, _, StrEq("rbd"), StrEq("object_map_resize"), _, _, _));
     expect.WillOnce(Return(r));

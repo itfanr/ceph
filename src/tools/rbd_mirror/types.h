@@ -6,11 +6,12 @@
 
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "include/rados/librados.hpp"
 #include "include/rbd/librbd.hpp"
-#include "ImageSyncThrottler.h"
 
 namespace rbd {
 namespace mirror {
@@ -19,8 +20,46 @@ typedef shared_ptr<librados::Rados> RadosRef;
 typedef shared_ptr<librados::IoCtx> IoCtxRef;
 typedef shared_ptr<librbd::Image> ImageRef;
 
-template <typename I = librbd::ImageCtx>
-using ImageSyncThrottlerRef = std::shared_ptr<ImageSyncThrottler<I>>;
+struct ImageId {
+  std::string global_id;
+  std::string id;
+
+  explicit ImageId(const std::string &global_id) : global_id(global_id) {
+  }
+  ImageId(const std::string &global_id, const std::string &id)
+    : global_id(global_id), id(id) {
+  }
+
+  inline bool operator==(const ImageId &rhs) const {
+    return (global_id == rhs.global_id && id == rhs.id);
+  }
+  inline bool operator<(const ImageId &rhs) const {
+    return global_id < rhs.global_id;
+  }
+};
+
+std::ostream &operator<<(std::ostream &, const ImageId &image_id);
+
+typedef std::set<ImageId> ImageIds;
+
+struct Peer {
+  std::string peer_uuid;
+  librados::IoCtx io_ctx;
+
+  Peer() {
+  }
+  Peer(const std::string &peer_uuid) : peer_uuid(peer_uuid) {
+  }
+  Peer(const std::string &peer_uuid, librados::IoCtx& io_ctx)
+    : peer_uuid(peer_uuid), io_ctx(io_ctx) {
+  }
+
+  inline bool operator<(const Peer &rhs) const {
+    return peer_uuid < rhs.peer_uuid;
+  }
+};
+
+typedef std::set<Peer> Peers;
 
 struct peer_t {
   peer_t() = default;
@@ -49,9 +88,10 @@ struct peer_t {
   }
 };
 
+std::ostream& operator<<(std::ostream& lhs, const peer_t &peer);
+
 } // namespace mirror
 } // namespace rbd
 
-std::ostream& operator<<(std::ostream& lhs, const rbd::mirror::peer_t &peer);
 
 #endif // CEPH_RBD_MIRROR_TYPES_H

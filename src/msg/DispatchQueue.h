@@ -20,14 +20,12 @@
 #include <boost/intrusive_ptr.hpp>
 #include "include/assert.h"
 #include "include/xlist.h"
-#include "include/atomic.h"
 #include "common/Mutex.h"
 #include "common/Cond.h"
 #include "common/Thread.h"
 #include "common/PrioritizedQueue.h"
 
 class CephContext;
-class DispatchQueue;
 class Messenger;
 class Message;
 struct Connection;
@@ -99,7 +97,7 @@ class DispatchQueue {
     DispatchQueue *dq;
   public:
     explicit DispatchThread(DispatchQueue *dq) : dq(dq) {}
-    void *entry() {
+    void *entry() override {
       dq->entry();
       return 0;
     }
@@ -113,7 +111,7 @@ class DispatchQueue {
     DispatchQueue *dq;
   public:
     explicit LocalDeliveryThread(DispatchQueue *dq) : dq(dq) {}
-    void *entry() {
+    void *entry() override {
       dq->run_local_delivery();
       return 0;
     }
@@ -196,7 +194,7 @@ class DispatchQueue {
     cond.Signal();
   }
 
-  bool can_fast_dispatch(Message *m) const;
+  bool can_fast_dispatch(const Message *m) const;
   void fast_dispatch(Message *m);
   void fast_preprocess(Message *m);
   void enqueue(Message *m, int priority, uint64_t id);

@@ -20,9 +20,11 @@
 
 #include <map>
 #include <deque>
-#include <boost/scoped_ptr.hpp>
+#include <atomic>
 #include <fstream>
-using namespace std;
+
+
+#include <boost/scoped_ptr.hpp>
 
 #include "include/unordered_map.h"
 
@@ -33,6 +35,8 @@ using namespace std;
 
 #include "common/Timer.h"
 #include "common/WorkQueue.h"
+#include "common/perf_counters.h"
+#include "common/zipkin_trace.h"
 
 #include "common/Mutex.h"
 #include "HashIndex.h"
@@ -43,12 +47,6 @@ using namespace std;
 #include "WBThrottle.h"
 
 #include "include/uuid.h"
-
-
-// from include/linux/falloc.h:
-#ifndef FALLOC_FL_PUNCH_HOLE
-# define FALLOC_FL_PUNCH_HOLE 0x2
-#endif
 
 #if defined(__linux__)
 # ifndef BTRFS_SUPER_MAGIC
@@ -66,6 +64,32 @@ using namespace std;
 class FileStoreBackend;
 
 #define CEPH_FS_FEATURE_INCOMPAT_SHARDS CompatSet::Feature(1, "sharded objects")
+
+enum {
+  l_filestore_first = 84000,
+  l_filestore_journal_queue_ops,
+  l_filestore_journal_queue_bytes,
+  l_filestore_journal_ops,
+  l_filestore_journal_bytes,
+  l_filestore_journal_latency,
+  l_filestore_journal_wr,
+  l_filestore_journal_wr_bytes,
+  l_filestore_journal_full,
+  l_filestore_committing,
+  l_filestore_commitcycle,
+  l_filestore_commitcycle_interval,
+  l_filestore_commitcycle_latency,
+  l_filestore_op_queue_max_ops,
+  l_filestore_op_queue_ops,
+  l_filestore_ops,
+  l_filestore_op_queue_max_bytes,
+  l_filestore_op_queue_bytes,
+  l_filestore_bytes,
+  l_filestore_apply_latency,
+  l_filestore_queue_transaction_latency_avg,
+  l_filestore_sync_pause_max_lat,
+  l_filestore_last,
+};
 
 class FSSuperblock {
 public:
@@ -96,24 +120,27 @@ public:
     return target_version;
   }
 
-  static int get_block_device_fsid(const string& path, uuid_d *fsid);
-
+  static int get_block_device_fsid(CephContext* cct, const string& path,
+				   uuid_d *fsid);
   struct FSPerfTracker {
-    PerfCounters::avg_tracker<uint64_t> os_commit_latency;
-    PerfCounters::avg_tracker<uint64_t> os_apply_latency;
+    PerfCounters::avg_tracker<uint64_t> os_commit_latency_ns;
+    PerfCounters::avg_tracker<uint64_t> os_apply_latency_ns;
 
     objectstore_perf_stat_t get_cur_stats() const {
       objectstore_perf_stat_t ret;
-      ret.filestore_commit_latency = os_commit_latency.avg();
-      ret.filestore_apply_latency = os_apply_latency.avg();
+      ret.os_commit_latency_ns = os_commit_latency_ns.current_avg();
+      ret.os_apply_latency_ns = os_apply_latency_ns.current_avg();
       return ret;
     }
 
     void update_from_perfcounters(PerfCounters &logger);
   } perf_tracker;
-  objectstore_perf_stat_t get_cur_stats() {
+  objectstore_perf_stat_t get_cur_stats() override {
     perf_tracker.update_from_perfcounters(*logger);
     return perf_tracker.get_cur_stats();
+  }
+  const PerfCounters* get_perf_counters() const override {
+    return logger;
   }
 
 private:
@@ -145,12 +172,6 @@ private:
     // - hammer temp case: cid is pg (or already temp), object pool is -1
     return cid.is_pg() && oid.hobj.pool <= -1;
   }
-  void _kludge_temp_object_collection(coll_t& cid, const ghobject_t& oid) {
-    // - normal temp case: cid is pg, object is temp (pool < -1)
-    // - hammer temp case: cid is pg (or already temp), object pool is -1
-    if (cid.is_pg() && oid.hobj.pool <= -1)
-      cid = cid.get_temp();
-  }
   void init_temp_collections();
 
   // ObjectMap
@@ -179,7 +200,7 @@ private:
   struct SyncThread : public Thread {
     FileStore *fs;
     explicit SyncThread(FileStore *f) : fs(f) {}
-    void *entry() {
+    void *entry() override {
       fs->sync_entry();
       return 0;
     }
@@ -193,17 +214,23 @@ private:
     Context *onreadable, *onreadable_sync;
     uint64_t ops, bytes;
     TrackedOpRef osd_op;
+    ZTracer::Trace trace;
+    bool registered_apply = false;
   };
-  class OpSequencer : public Sequencer_impl {
+  class OpSequencer : public CollectionImpl {
+    CephContext *cct;
     Mutex qlock; // to protect q, for benefit of flush (peek/dequeue also protected by lock)
     list<Op*> q;
     list<uint64_t> jq;
     list<pair<uint64_t, Context*> > flush_commit_waiters;
     Cond cond;
+    string osr_name_str;
+    /// hash of pointers to ghobject_t's for in-flight writes
+    unordered_multimap<uint32_t,const ghobject_t*> applying;
   public:
-    Sequencer *parent;
     Mutex apply_lock;  // for apply mutual exclusion
     int id;
+    const char *osr_name;
 
     /// get_max_uncompleted
     bool _get_max_uncompleted(
@@ -254,9 +281,10 @@ private:
       }
     }
 
-    void queue_journal(uint64_t s) {
+    void queue_journal(Op *o) {
       Mutex::Locker l(qlock);
-      jq.push_back(s);
+      jq.push_back(o->op);
+      _register_apply(o);
     }
     void dequeue_journal(list<Context*> *to_queue) {
       Mutex::Locker l(qlock);
@@ -267,7 +295,12 @@ private:
     void queue(Op *o) {
       Mutex::Locker l(qlock);
       q.push_back(o);
+      _register_apply(o);
+      o->trace.keyval("queue depth", q.size());
     }
+    void _register_apply(Op *o);
+    void _unregister_apply(Op *o);
+    void wait_for_apply(const ghobject_t& oid);
     Op *peek_queue() {
       Mutex::Locker l(qlock);
       assert(apply_lock.is_locked());
@@ -281,15 +314,15 @@ private:
       Op *o = q.front();
       q.pop_front();
       cond.Signal();
-
+      _unregister_apply(o);
       _wake_flush_waiters(to_queue);
       return o;
     }
 
-    void flush() {
+    void flush() override {
       Mutex::Locker l(qlock);
 
-      while (g_conf->filestore_blackhole)
+      while (cct->_conf->filestore_blackhole)
 	cond.Wait(qlock);  // wait forever
 
 
@@ -307,7 +340,7 @@ private:
 	  cond.Wait(qlock);
       }
     }
-    bool flush_commit(Context *c) {
+    bool flush_commit(Context *c) override {
       Mutex::Locker l(qlock);
       uint64_t seq = 0;
       if (_get_max_uncompleted(&seq)) {
@@ -318,26 +351,29 @@ private:
       }
     }
 
-    explicit OpSequencer(int i)
-      : qlock("FileStore::OpSequencer::qlock", false, false),
-	parent(0),
+    OpSequencer(CephContext* cct, int i, coll_t cid)
+      : CollectionImpl(cid),
+	cct(cct),
+	qlock("FileStore::OpSequencer::qlock", false, false),
+	osr_name_str(stringify(cid)),
 	apply_lock("FileStore::OpSequencer::apply_lock", false, false),
-        id(i) {}
-    ~OpSequencer() {
+        id(i),
+	osr_name(osr_name_str.c_str()) {}
+    ~OpSequencer() override {
       assert(q.empty());
     }
-
-    const string& get_name() const {
-      return parent->get_name();
-    }
   };
+  typedef boost::intrusive_ptr<OpSequencer> OpSequencerRef;
+
+  Mutex coll_lock;
+  map<coll_t,OpSequencerRef> coll_map;
 
   friend ostream& operator<<(ostream& out, const OpSequencer& s);
 
   FDCache fdcache;
   WBThrottle wbthrottle;
 
-  atomic_t next_osr_id;
+  std::atomic<int64_t> next_osr_id = { 0 };
   bool m_disable_wbthrottle;
   deque<OpSequencer*> op_queue;
   BackoffThrottle throttle_ops, throttle_bytes;
@@ -352,19 +388,19 @@ private:
     OpWQ(FileStore *fs, time_t timeout, time_t suicide_timeout, ThreadPool *tp)
       : ThreadPool::WorkQueue<OpSequencer>("FileStore::OpWQ", timeout, suicide_timeout, tp), store(fs) {}
 
-    bool _enqueue(OpSequencer *osr) {
+    bool _enqueue(OpSequencer *osr) override {
       store->op_queue.push_back(osr);
       return true;
     }
-    void _dequeue(OpSequencer *o) {
-      assert(0);
+    void _dequeue(OpSequencer *o) override {
+      ceph_abort();
     }
-    bool _empty() {
+    bool _empty() override {
       return store->op_queue.empty();
     }
-    OpSequencer *_dequeue() {
+    OpSequencer *_dequeue() override {
       if (store->op_queue.empty())
-	return NULL;
+	return nullptr;
       OpSequencer *osr = store->op_queue.front();
       store->op_queue.pop_front();
       return osr;
@@ -372,10 +408,10 @@ private:
     void _process(OpSequencer *osr, ThreadPool::TPHandle &handle) override {
       store->_do_op(osr, handle);
     }
-    void _process_finish(OpSequencer *osr) {
+    void _process_finish(OpSequencer *osr) override {
       store->_finish_op(osr);
     }
-    void _clear() {
+    void _clear() override {
       assert(store->op_queue.empty());
     }
   } op_wq;
@@ -395,9 +431,11 @@ private:
 
   PerfCounters *logger;
 
+  ZTracer::Endpoint trace_endpoint;
+
 public:
   int lfn_find(const ghobject_t& oid, const Index& index,
-                                  IndexedPath *path = NULL);
+                                  IndexedPath *path = nullptr);
   int lfn_truncate(const coll_t& cid, const ghobject_t& oid, off_t length);
   int lfn_stat(const coll_t& cid, const ghobject_t& oid, struct stat *buf);
   int lfn_open(
@@ -405,7 +443,7 @@ public:
     const ghobject_t& oid,
     bool create,
     FDRef *outfd,
-    Index *index = 0);
+    Index *index = nullptr);
 
   void lfn_close(FDRef fd);
   int lfn_link(const coll_t& c, const coll_t& newcid, const ghobject_t& o, const ghobject_t& newoid) ;
@@ -413,69 +451,87 @@ public:
 		 bool force_clear_omap=false);
 
 public:
-  FileStore(const std::string &base, const std::string &jdev,
-    osflagbits_t flags = 0,
+  FileStore(CephContext* cct, const std::string &base, const std::string &jdev,
+	    osflagbits_t flags = 0,
     const char *internal_name = "filestore", bool update_to=false);
-  ~FileStore();
+  ~FileStore() override;
 
-  string get_type() {
+  string get_type() override {
     return "filestore";
   }
 
   int _detect_fs();
   int _sanity_check_fs();
 
-  bool test_mount_in_use();
+  bool test_mount_in_use() override;
   int read_op_seq(uint64_t *seq);
   int write_op_seq(int, uint64_t seq);
-  int mount();
-  int umount();
+  int mount() override;
+  int umount() override;
 
   int validate_hobject_key(const hobject_t &obj) const override;
 
-  unsigned get_max_attr_name_length() {
+  unsigned get_max_attr_name_length() override {
     // xattr limit is 128; leave room for our prefixes (user.ceph._),
     // some margin, and cap at 100
     return 100;
   }
-  int mkfs();
-  int mkjournal();
-  bool wants_journal() {
+  int mkfs() override;
+  int mkjournal() override;
+  bool wants_journal() override {
     return true;
   }
-  bool allows_journal() {
+  bool allows_journal() override {
     return true;
   }
-  bool needs_journal() {
+  bool needs_journal() override {
     return false;
+  }
+
+  bool is_sync_onreadable() const override {
+    return false;
+  }
+
+  bool is_rotational() override;
+  bool is_journal_rotational() override;
+
+  void dump_perf_counters(Formatter *f) override {
+    f->open_object_section("perf_counters");
+    logger->dump_formatted(f, false);
+    f->close_section();
   }
 
   int write_version_stamp();
   int version_stamp_is_valid(uint32_t *version);
   int update_version_stamp();
-  int upgrade();
+  int upgrade() override;
 
-  bool can_sort_nibblewise() {
+  bool can_sort_nibblewise() override {
     return true;    // i support legacy sort order
   }
 
-  void collect_metadata(map<string,string> *pm);
+  void collect_metadata(map<string,string> *pm) override;
+  int get_devices(set<string> *ls) override;
 
   int statfs(struct store_statfs_t *buf) override;
 
   int _do_transactions(
     vector<Transaction> &tls, uint64_t op_seq,
-    ThreadPool::TPHandle *handle);
-  int do_transactions(vector<Transaction> &tls, uint64_t op_seq) {
-    return _do_transactions(tls, op_seq, 0);
+    ThreadPool::TPHandle *handle,
+    const char *osr_name);
+  int do_transactions(vector<Transaction> &tls, uint64_t op_seq) override {
+    return _do_transactions(tls, op_seq, nullptr, "replay");
   }
   void _do_transaction(
     Transaction& t, uint64_t op_seq, int trans_num,
-    ThreadPool::TPHandle *handle);
+    ThreadPool::TPHandle *handle, const char *osr_name);
 
-  int queue_transactions(Sequencer *osr, vector<Transaction>& tls,
+  CollectionHandle open_collection(const coll_t& c) override;
+  CollectionHandle create_new_collection(const coll_t& c) override;
+
+  int queue_transactions(CollectionHandle& ch, vector<Transaction>& tls,
 			 TrackedOpRef op = TrackedOpRef(),
-			 ThreadPool::TPHandle *handle = NULL);
+			 ThreadPool::TPHandle *handle = nullptr) override;
 
   /**
    * set replay guard xattr on given file
@@ -497,7 +553,8 @@ public:
 				const SequencerPosition &spos);
 
   /// close a replay guard opened with in_progress=true
-  void _close_replay_guard(int fd, const SequencerPosition& spos);
+  void _close_replay_guard(int fd, const SequencerPosition& spos,
+			   const ghobject_t *oid=0);
   void _close_replay_guard(const coll_t& cid, const SequencerPosition& spos);
 
   /**
@@ -518,7 +575,7 @@ public:
    */
   int _check_replay_guard(int fd, const SequencerPosition& spos);
   int _check_replay_guard(const coll_t& cid, const SequencerPosition& spos);
-  int _check_replay_guard(const coll_t& cid, ghobject_t oid, const SequencerPosition& pos);
+  int _check_replay_guard(const coll_t& cid, const ghobject_t &oid, const SequencerPosition& pos);
   int _check_global_replay_guard(const coll_t& cid, const SequencerPosition& spos);
 
   // ------------------
@@ -527,28 +584,32 @@ public:
     return 0;
   }
   using ObjectStore::exists;
-  bool exists(const coll_t& cid, const ghobject_t& oid);
+  bool exists(CollectionHandle& c, const ghobject_t& oid) override;
   using ObjectStore::stat;
   int stat(
-    const coll_t& cid,
+    CollectionHandle& c,
     const ghobject_t& oid,
     struct stat *st,
-    bool allow_eio = false);
+    bool allow_eio = false) override;
+  using ObjectStore::set_collection_opts;
+  int set_collection_opts(
+    CollectionHandle& c,
+    const pool_opts_t& opts) override;
   using ObjectStore::read;
   int read(
-    const coll_t& cid,
+    CollectionHandle& c,
     const ghobject_t& oid,
     uint64_t offset,
     size_t len,
     bufferlist& bl,
-    uint32_t op_flags = 0,
-    bool allow_eio = false);
+    uint32_t op_flags = 0) override;
   int _do_fiemap(int fd, uint64_t offset, size_t len,
                  map<uint64_t, uint64_t> *m);
   int _do_seek_hole_data(int fd, uint64_t offset, size_t len,
                          map<uint64_t, uint64_t> *m);
   using ObjectStore::fiemap;
-  int fiemap(const coll_t& cid, const ghobject_t& oid, uint64_t offset, size_t len, bufferlist& bl);
+  int fiemap(CollectionHandle& c, const ghobject_t& oid, uint64_t offset, size_t len, bufferlist& bl) override;
+  int fiemap(CollectionHandle& c, const ghobject_t& oid, uint64_t offset, size_t len, map<uint64_t, uint64_t>& destmap) override;
 
   int _touch(const coll_t& cid, const ghobject_t& oid);
   int _write(const coll_t& cid, const ghobject_t& oid, uint64_t offset, size_t len,
@@ -557,7 +618,7 @@ public:
   int _truncate(const coll_t& cid, const ghobject_t& oid, uint64_t size);
   int _clone(const coll_t& cid, const ghobject_t& oldoid, const ghobject_t& newoid,
 	     const SequencerPosition& spos);
-  int _clone_range(const coll_t& cid, const ghobject_t& oldoid, const ghobject_t& newoid,
+  int _clone_range(const coll_t& oldcid, const ghobject_t& oldoid, const coll_t& newcid, const ghobject_t& newoid,
 		   uint64_t srcoff, uint64_t len, uint64_t dstoff,
 		   const SequencerPosition& spos);
   int _do_clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff);
@@ -569,8 +630,6 @@ public:
   int _fgetattrs(int fd, map<string,bufferptr>& aset);
   int _fsetattrs(int fd, map<string, bufferptr> &aset);
 
-  void _start_sync();
-
   void do_force_sync();
   void start_sync(Context *onsafe);
   void sync();
@@ -578,33 +637,43 @@ public:
   void flush();
   void sync_and_flush();
 
-  int flush_journal();
-  int dump_journal(ostream& out);
+  int flush_journal() override;
+  int dump_journal(ostream& out) override;
 
-  void set_fsid(uuid_d u) {
+  void set_fsid(uuid_d u) override {
     fsid = u;
   }
-  uuid_d get_fsid() { return fsid; }
+  uuid_d get_fsid() override { return fsid; }
   
-  uint64_t estimate_objects_overhead(uint64_t num_objects);
+  uint64_t estimate_objects_overhead(uint64_t num_objects) override;
 
   // DEBUG read error injection, an object is removed from both on delete()
   Mutex read_error_lock;
-  set<ghobject_t, ghobject_t::BitwiseComparator> data_error_set; // read() will return -EIO
-  set<ghobject_t, ghobject_t::BitwiseComparator> mdata_error_set; // getattr(),stat() will return -EIO
-  void inject_data_error(const ghobject_t &oid);
-  void inject_mdata_error(const ghobject_t &oid);
+  set<ghobject_t> data_error_set; // read() will return -EIO
+  set<ghobject_t> mdata_error_set; // getattr(),stat() will return -EIO
+  void inject_data_error(const ghobject_t &oid) override;
+  void inject_mdata_error(const ghobject_t &oid) override;
+
+  void compact() override {
+    assert(object_map);
+    object_map->compact();
+  }
+
+  bool has_builtin_csum() const override {
+    return false;
+  }
+
   void debug_obj_on_delete(const ghobject_t &oid);
   bool debug_data_eio(const ghobject_t &oid);
   bool debug_mdata_eio(const ghobject_t &oid);
 
-  int snapshot(const string& name);
+  int snapshot(const string& name) override;
 
   // attrs
   using ObjectStore::getattr;
   using ObjectStore::getattrs;
-  int getattr(const coll_t& cid, const ghobject_t& oid, const char *name, bufferptr &bp);
-  int getattrs(const coll_t& cid, const ghobject_t& oid, map<string,bufferptr>& aset);
+  int getattr(CollectionHandle& c, const ghobject_t& oid, const char *name, bufferptr &bp) override;
+  int getattrs(CollectionHandle& c, const ghobject_t& oid, map<string,bufferptr>& aset) override;
 
   int _setattrs(const coll_t& cid, const ghobject_t& oid, map<string,bufferptr>& aset,
 		const SequencerPosition &spos);
@@ -616,39 +685,54 @@ public:
   int _collection_remove_recursive(const coll_t &cid,
 				   const SequencerPosition &spos);
 
+  int _collection_set_bits(const coll_t& cid, int bits);
+
   // collections
   using ObjectStore::collection_list;
-  int collection_list(const coll_t& c, ghobject_t start, ghobject_t end,
-		      bool sort_bitwise, int max,
+  int collection_bits(CollectionHandle& c) override;
+  int collection_list(CollectionHandle& c,
+		      const ghobject_t& start, const ghobject_t& end, int max,
+		      vector<ghobject_t> *ls, ghobject_t *next) override {
+    c->flush();
+    return collection_list(c->cid, start, end, max, ls, next);
+  }
+  int collection_list(const coll_t& cid,
+		      const ghobject_t& start, const ghobject_t& end, int max,
 		      vector<ghobject_t> *ls, ghobject_t *next);
-  int list_collections(vector<coll_t>& ls);
+  int list_collections(vector<coll_t>& ls) override;
   int list_collections(vector<coll_t>& ls, bool include_temp);
   int collection_stat(const coll_t& c, struct stat *st);
-  bool collection_exists(const coll_t& c);
-  int collection_empty(const coll_t& c, bool *empty);
+  bool collection_exists(const coll_t& c) override;
+  int collection_empty(CollectionHandle& c, bool *empty) override {
+    c->flush();
+    return collection_empty(c->cid, empty);
+  }
+  int collection_empty(const coll_t& cid, bool *empty);
 
   // omap (see ObjectStore.h for documentation)
   using ObjectStore::omap_get;
-  int omap_get(const coll_t& c, const ghobject_t &oid, bufferlist *header,
-	       map<string, bufferlist> *out);
+  int omap_get(CollectionHandle& c, const ghobject_t &oid, bufferlist *header,
+	       map<string, bufferlist> *out) override;
   using ObjectStore::omap_get_header;
   int omap_get_header(
-    const coll_t& c,
+    CollectionHandle& c,
     const ghobject_t &oid,
     bufferlist *out,
-    bool allow_eio = false);
+    bool allow_eio = false) override;
   using ObjectStore::omap_get_keys;
-  int omap_get_keys(const coll_t& c, const ghobject_t &oid, set<string> *keys);
+  int omap_get_keys(CollectionHandle& c, const ghobject_t &oid, set<string> *keys) override;
   using ObjectStore::omap_get_values;
-  int omap_get_values(const coll_t& c, const ghobject_t &oid, const set<string> &keys,
-		      map<string, bufferlist> *out);
+  int omap_get_values(CollectionHandle& c, const ghobject_t &oid, const set<string> &keys,
+		      map<string, bufferlist> *out) override;
   using ObjectStore::omap_check_keys;
-  int omap_check_keys(const coll_t& c, const ghobject_t &oid, const set<string> &keys,
-		      set<string> *out);
+  int omap_check_keys(CollectionHandle& c, const ghobject_t &oid, const set<string> &keys,
+		      set<string> *out) override;
   using ObjectStore::get_omap_iterator;
-  ObjectMap::ObjectMapIterator get_omap_iterator(const coll_t& c, const ghobject_t &oid);
+  ObjectMap::ObjectMapIterator get_omap_iterator(CollectionHandle& c, const ghobject_t &oid) override;
+  ObjectMap::ObjectMapIterator get_omap_iterator(const coll_t& cid, const ghobject_t &oid);
 
-  int _create_collection(const coll_t& c, const SequencerPosition &spos);
+  int _create_collection(const coll_t& c, int bits,
+			 const SequencerPosition &spos);
   int _destroy_collection(const coll_t& c);
   /**
    * Give an expected number of objects hint to the collection.
@@ -678,7 +762,7 @@ public:
   void dump_stop();
   void dump_transactions(vector<Transaction>& ls, uint64_t seq, OpSequencer *osr);
 
-  virtual int apply_layout_settings(const coll_t &cid);
+  virtual int apply_layout_settings(const coll_t &cid, int target_level);
 
 private:
   void _inject_failure();
@@ -702,9 +786,9 @@ private:
 			       coll_t dest,
 			       const SequencerPosition &spos);
 
-  virtual const char** get_tracked_conf_keys() const;
-  virtual void handle_conf_change(const struct md_config_t *conf,
-			  const std::set <std::string> &changed);
+  const char** get_tracked_conf_keys() const override;
+  void handle_conf_change(const struct md_config_t *conf,
+                          const std::set <std::string> &changed) override;
   int set_throttle_params();
   float m_filestore_commit_timeout;
   bool m_filestore_journal_parallel;
@@ -722,7 +806,7 @@ private:
   bool m_filestore_do_dump;
   std::ofstream m_filestore_dump;
   JSONFormatter m_filestore_dump_fmt;
-  atomic_t m_filestore_kill_at;
+  std::atomic<int64_t> m_filestore_kill_at = { 0 };
   bool m_filestore_sloppy_crc;
   int m_filestore_sloppy_crc_block_size;
   uint64_t m_filestore_max_alloc_hint_size;
@@ -781,6 +865,9 @@ protected:
   const string& get_basedir_path() {
     return filestore->basedir;
   }
+  const string& get_journal_path() {
+    return filestore->journalpath;
+  }
   const string& get_current_path() {
     return filestore->current_fn;
   }
@@ -799,6 +886,10 @@ public:
   explicit FileStoreBackend(FileStore *fs) : filestore(fs) {}
   virtual ~FileStoreBackend() {}
 
+  CephContext* cct() const {
+    return filestore->cct;
+  }
+
   static FileStoreBackend *create(long f_type, FileStore *fs);
 
   virtual const char *get_name() = 0;
@@ -813,6 +904,8 @@ public:
   virtual int syncfs() = 0;
   virtual bool has_fiemap() = 0;
   virtual bool has_seek_data_hole() = 0;
+  virtual bool is_rotational() = 0;
+  virtual bool is_journal_rotational() = 0;
   virtual int do_fiemap(int fd, off_t start, size_t len, struct fiemap **pfiemap) = 0;
   virtual int clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff) = 0;
   virtual int set_alloc_hint(int fd, uint64_t hint) = 0;

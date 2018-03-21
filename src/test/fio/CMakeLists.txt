@@ -1,5 +1,5 @@
 add_library(fio_ceph_objectstore SHARED fio_ceph_objectstore.cc)
-target_include_directories(fio_ceph_objectstore PUBLIC ${FIO_INCLUDE_DIR})
+target_include_directories(fio_ceph_objectstore SYSTEM PUBLIC ${FIO_INCLUDE_DIR})
 
 # prevent fio from adding a 'typedef int bool'
 set(FIO_CFLAGS "-DCONFIG_HAVE_BOOL")
@@ -14,5 +14,8 @@ else()
     COMPILE_FLAGS "${FIO_CFLAGS}")
 endif()
 
+if(WITH_FIO)
+  add_dependencies(fio_ceph_objectstore fio_ext)
+endif()
 target_link_libraries(fio_ceph_objectstore os global)
 install(TARGETS fio_ceph_objectstore DESTINATION lib)
