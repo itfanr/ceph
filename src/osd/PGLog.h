@@ -74,6 +74,11 @@ struct PGLog : DoutPrefixProvider {
    * IndexLog - adds in-memory index of the log, by oid.
    * plus some methods to manipulate it all.
    */
+   
+   /*
+   类IndexedLog继承了类pg_log_t，在其基础上添加了根据一个对象来检索日志的功能，
+   以及其他相关的功能。
+   */
   struct IndexedLog : public pg_log_t {
     mutable ceph::unordered_map<hobject_t,pg_log_entry_t*> objects;  // ptrs into log.  be careful!
     mutable ceph::unordered_map<osd_reqid_t,pg_log_entry_t*> caller_ops;
