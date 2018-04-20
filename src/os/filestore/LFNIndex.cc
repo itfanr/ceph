@@ -400,7 +400,7 @@ static int get_hobject_from_oinfo(const char *dir, const char *file,
   return 0;
 }
 
-
+//列举pg current目录下的文件
 int LFNIndex::list_objects(const vector<string> &to_list, int max_objs,
 			   long *handle, map<string, ghobject_t> *out)
 {

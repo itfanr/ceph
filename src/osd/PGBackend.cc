@@ -115,6 +115,8 @@ void PGBackend::on_change_cleanup(ObjectStore::Transaction *t)
   temp_contents.clear();
 }
 
+//chunky_scrub函数调用
+//随机扫描一组对象
 int PGBackend::objects_list_partial(
   const hobject_t &begin,
   int min,
@@ -159,6 +161,7 @@ int PGBackend::objects_list_partial(
   return r;
 }
 
+//build_scrub_map_chunk 调用
 int PGBackend::objects_list_range(
   const hobject_t &start,
   const hobject_t &end,
@@ -168,6 +171,7 @@ int PGBackend::objects_list_range(
 {
   assert(ls);
   vector<ghobject_t> objects;
+  //获取pg下的对象集合 
   int r = store->collection_list(
     ch,
     ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
@@ -177,6 +181,7 @@ int PGBackend::objects_list_range(
     &objects,
     NULL);
   ls->reserve(objects.size());
+  
   for (vector<ghobject_t>::iterator i = objects.begin();
        i != objects.end();
        ++i) {
@@ -346,6 +351,7 @@ PGBackend *PGBackend::build_pg_backend(
  * pg lock may or may not be held
  */
 //函数be_scan_list用于构建ScubMap中对象的校验信息
+//ls：对象集合
 void PGBackend::be_scan_list(
   ScrubMap &map, const vector<hobject_t> &ls, bool deep, uint32_t seed,
   ThreadPool::TPHandle &handle)
@@ -360,6 +366,7 @@ void PGBackend::be_scan_list(
     hobject_t poid = *p;
 
     struct stat st;
+	//stat某个对象
     int r = store->stat(
       ch,
       ghobject_t(
@@ -378,7 +385,7 @@ void PGBackend::be_scan_list(
 
       // calculate the CRC32 on deep scrubs
       if (deep) {
-	be_deep_scrub(*p, seed, o, handle);
+		be_deep_scrub(*p, seed, o, handle);
       }
 
       dout(25) << __func__ << "  " << poid << dendl;
@@ -492,6 +499,13 @@ enum scrub_error_type PGBackend::be_compare_scrub_objects(
 
 //函数be_select_auth_object用于在各个OSD上的副本对象中，
 //选择出一个权威的对象：auth_obj对象。其原理是根据自身所带的冗余信息来验证自己是否完整
+/*
+由上述的选择过程可知，选中一个权威对象的条件如下：
+
+1、对象的数据和属性能正确读取。
+2、利用object_info_t中保存的对象size，
+以及omap和data的digest的冗余信息。用这些信息和对象扫描读取的数据计算出的信息比较来验证。
+*/
 map<pg_shard_t, ScrubMap *>::const_iterator
   PGBackend::be_select_auth_object(
   const hobject_t &obj,
@@ -507,6 +521,8 @@ map<pg_shard_t, ScrubMap *>::const_iterator
     if (i == j->second->objects.end()) {
       continue;
     }
+	//首先确认该对象的read_error和stat_error没有设置，也就在获取对象的数据和元数据的过程中没
+	//有出错，有错则跳过
     if (i->second.read_error || i->second.stat_error) {
       // scrub encountered read error or stat_error, probably corrupt
       dout(10) << __func__ << ": rejecting osd " << j->first
@@ -516,6 +532,9 @@ map<pg_shard_t, ScrubMap *>::const_iterator
 	       << dendl;
       continue;
     }
+
+	//确认获取的属性OI_ATTR值不为空，并将数据结构object_info_t正确解码，
+	//就设置当前的对象为auth_obj对象
     map<string, bufferptr>::iterator k = i->second.attrs.find(OI_ATTR);
     if (k == i->second.attrs.end()) {
       // no object info on object, probably corrupt
@@ -545,7 +564,8 @@ map<pg_shard_t, ScrubMap *>::const_iterator
     // something is better than nothing.  FIXME.
     auth = j;
     *auth_oi = oi;
-
+	//验证保存在objec_info_t中的size值和扫描获取对象的size值是否一致，
+	//如果不一致，就继续查找一个更好的auth_obj对象。
     uint64_t correct_size = be_get_ondisk_size(oi.size);
     if (correct_size != i->second.size) {
       // invalid size, probably corrupt
@@ -556,6 +576,8 @@ map<pg_shard_t, ScrubMap *>::const_iterator
       // invalid object info, probably corrupt
       continue;
     }
+	//如果是replicated类型的PG，验证在object_info_t里保存的data和omap的digest值
+	//是否和扫描过程计算出的值一致。如果不一致，就继续查找一个更好的auth_obj对象
     if (parent->get_pool().is_replicated()) {
       if (oi.is_data_digest() && i->second.digest_present &&
 	  oi.data_digest != i->second.digest) {
@@ -586,6 +608,7 @@ map<pg_shard_t, ScrubMap *>::const_iterator
 }
 
 //函数be_compare_scrubmaps用来比较对象各个副本的一致性
+//比较pg中的item个数
 void PGBackend::be_compare_scrubmaps(
   const map<pg_shard_t,ScrubMap*> &maps,
   bool repair,
@@ -605,6 +628,7 @@ void PGBackend::be_compare_scrubmaps(
   utime_t now = ceph_clock_now(NULL);
 
   // Construct master set
+  //首先构建master set，也就是所有副本OSD上对象的并集
   for (j = maps.begin(); j != maps.end(); ++j) {
     for (i = j->second->objects.begin(); i != j->second->objects.end(); ++i) {
       master_set.insert(i->first);
@@ -616,6 +640,8 @@ void PGBackend::be_compare_scrubmaps(
        k != master_set.end();
        ++k) {
     object_info_t auth_oi;
+	//调用函数be_select_auth_object选择出一个具有权威对象的副本auth，
+	//如果没有选择出权威对象，变量shallow_errors加一来记录这种错误。
     map<pg_shard_t, ScrubMap *>::const_iterator auth =
       be_select_auth_object(*k, maps, &auth_oi);
     inconsistent_obj_wrapper object_error{*k};
@@ -636,12 +662,15 @@ void PGBackend::be_compare_scrubmaps(
     bool clean = true;
     for (j = maps.begin(); j != maps.end(); ++j) {
       if (j == auth)
-	continue;
+			continue;
       shard_info_wrapper shard_info;
       if (j->second->objects.count(*k)) {
 	shard_info.set_object(j->second->objects[*k]);
+	
 	// Compare
 	stringstream ss;
+	//调用函数be_compare_scrub_objects，比较各个shard上的对象和权威对象：
+	//分别对data的digest、omap的omap_digest和属性attrs进行对比：
 	enum scrub_error_type error =
 	  be_compare_scrub_objects(auth->first,
 				   auth_object,
@@ -662,6 +691,7 @@ void PGBackend::be_compare_scrubmaps(
 	  auth_list.push_back(j->first);
 	}
       } else {
+      //该pg上没有这个对象，标记为missing
 	clean = false;
 	cur_missing.insert(j->first);
 	++shallow_errors;
@@ -671,6 +701,10 @@ void PGBackend::be_compare_scrubmaps(
       }
       object_error.add_shard(j->first, shard_info);
     }
+
+	//检查该对象所有的比较结果：如果cur_missing不为空，就添加到missing队列列；
+	//如果有cur_inconsistent对象，就添加到inconsistent对象里；
+	//如果该对象有不完整的副本，就把没有问题的记录放在authoritative中
     if (!cur_missing.empty()) {
       missing[*k] = cur_missing;
     }
@@ -683,6 +717,9 @@ void PGBackend::be_compare_scrubmaps(
       object_error.add_shard(auth->first, auth_shard);
     }
 
+	//如果权威对象object_info里记录的data的digest和omap的omap_digest和
+	//实际扫描出数据计算的结果不一致，update的模式就设置为FORCE，强制修复。
+	//如果object_info里没有data的digest和omap的digest，修复的模式update设置为MAYBE
     if (clean &&
 	parent->get_pool().is_replicated()) {
       enum {
@@ -732,6 +769,9 @@ void PGBackend::be_compare_scrubmaps(
 
       if (update != NO) {
 	utime_t age = now - auth_oi.local_mtime;
+
+	//最后检查，如果update的模式为FORCE，或者该对象存在的时间age大于
+	//配置参数g_conf->osd_deep_scrub_update_digest_min_age的值，就加入missing_digest列表中
 	if (update == FORCE ||
 	    age > g_conf->osd_deep_scrub_update_digest_min_age) {
 	  dout(20) << __func__ << " will update digest on " << *k << dendl;

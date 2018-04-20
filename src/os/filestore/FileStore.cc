@@ -4787,6 +4787,8 @@ bool FileStore::collection_empty(const coll_t& c)
   tracepoint(objectstore, collection_empty_exit, ret);
   return ret;
 }
+
+//获取某个pg下的对象集合
 int FileStore::collection_list(const coll_t& c, ghobject_t start, ghobject_t end,
 			       bool sort_bitwise, int max,
 			       vector<ghobject_t> *ls, ghobject_t *next)
@@ -4828,6 +4830,7 @@ int FileStore::collection_list(const coll_t& c, ghobject_t start, ghobject_t end
     if (cmp_bitwise(start, sep) < 0) { // bitwise vs nibble doesn't matter here
       dout(10) << __func__ << " first checking temp pool" << dendl;
       coll_t temp = c.get_temp();
+	  //递归调用
       int r = collection_list(temp, start, end, sort_bitwise, max, ls, next);
       if (r < 0)
 	return r;
@@ -4849,6 +4852,8 @@ int FileStore::collection_list(const coll_t& c, ghobject_t start, ghobject_t end
   assert(NULL != index.index);
   RWLock::RLocker l((index.index)->access_lock);
 
+  //HashIndex::_collection_list_partial 函数
+  //r仅仅能标记opendir是否正常
   r = index->collection_list_partial(start, end, sort_bitwise, max, ls, next);
 
   if (r < 0) {

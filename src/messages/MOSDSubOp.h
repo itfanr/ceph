@@ -203,6 +203,9 @@ public:
     ::encode(old_version, payload);
     ::encode(snapset, payload);
 
+//a bug here
+//http://tracker.ceph.com/projects/ceph/repository/revisions/
+//22e0d6cf85d50a60070f36d72269cd0e1e78e4ee/diff/src/messages/MOSDSubOp.h?utf8=%E2%9C%93&type=sbs 
     if ((features & CEPH_FEATURE_OSDSUBOP_NO_SNAPCONTEXT) == 0) {
       header.version = 11;
       SnapContext dummy_snapc;

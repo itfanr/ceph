@@ -395,6 +395,7 @@ int HashIndex::_collection_list_partial(const ghobject_t &start,
     next = &_next;
   *next = start;
   dout(20) << __func__ << " start:" << start << " end:" << end << "-" << max_count << " ls.size " << ls->size() << dendl;
+ //返回值只能说明opendir是否正常
   return list_by_hash(path, end, sort_bitwise, max_count, next, ls);
 }
 
@@ -842,6 +843,7 @@ int HashIndex::get_path_contents_by_hash_bitwise(
 {
   map<string, ghobject_t> rev_objects;
   int r;
+  //列举pg current目录下的文件
   r = list_objects(path, 0, 0, &rev_objects);
   if (r < 0)
     return r;
@@ -972,6 +974,7 @@ int HashIndex::list_by_hash_bitwise(
   next_path.push_back("");
   set<string, CmpHexdigitStringBitwise> hash_prefixes;
   set<pair<string, ghobject_t>, CmpPairBitwise> objects;
+  //获取对象列表
   int r = get_path_contents_by_hash_bitwise(path,
 					    next,
 					    &hash_prefixes,
