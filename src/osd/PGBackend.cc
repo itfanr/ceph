@@ -345,6 +345,7 @@ PGBackend *PGBackend::build_pg_backend(
 /*
  * pg lock may or may not be held
  */
+//函数be_scan_list用于构建ScubMap中对象的校验信息
 void PGBackend::be_scan_list(
   ScrubMap &map, const vector<hobject_t> &ls, bool deep, uint32_t seed,
   ThreadPool::TPHandle &handle)
@@ -489,6 +490,8 @@ enum scrub_error_type PGBackend::be_compare_scrub_objects(
   return error;
 }
 
+//函数be_select_auth_object用于在各个OSD上的副本对象中，
+//选择出一个权威的对象：auth_obj对象。其原理是根据自身所带的冗余信息来验证自己是否完整
 map<pg_shard_t, ScrubMap *>::const_iterator
   PGBackend::be_select_auth_object(
   const hobject_t &obj,
@@ -582,6 +585,7 @@ map<pg_shard_t, ScrubMap *>::const_iterator
   return auth;
 }
 
+//函数be_compare_scrubmaps用来比较对象各个副本的一致性
 void PGBackend::be_compare_scrubmaps(
   const map<pg_shard_t,ScrubMap*> &maps,
   bool repair,

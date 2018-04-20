@@ -1119,6 +1119,7 @@ void ECBackend::handle_sub_read_reply(
 	    err = rop.complete[iter->first].errors.begin()->second;
             rop.complete[iter->first].r = err;
 	  } else {
+	  	//may case osd to core when some objectes in pg missing
 	    get_parent()->clog_error() << __func__ << ": Error(s) ignored for "
 				       << iter->first << " enough copies available" << "\n";
 	    dout(10) << __func__ << " Error(s) ignored for " << iter->first

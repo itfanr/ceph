@@ -117,6 +117,7 @@ int IndexManager::build_index(coll_t c, const char *path, CollectionIndex **inde
   }
 }
 
+//读取pg目录下的__head文件
 int IndexManager::get_index(coll_t c, const string& baseDir, Index *index) {
 
   Mutex::Locker l(lock);

@@ -6231,6 +6231,7 @@ void OSD::_dispatch(Message *m)
     break;
 
   case MSG_OSD_SCRUB:
+  	//处理PGMonitor发来的scrub命令
     handle_scrub(static_cast<MOSDScrub*>(m));
     break;
 
@@ -6301,6 +6302,7 @@ void OSD::handle_scrub(MOSDScrub *m)
 	  pg->scrubber.must_scrub = true;
 	  pg->scrubber.must_deep_scrub = m->deep || m->repair;
 	  pg->scrubber.must_repair = m->repair;
+	  //增加一个scrub任务，等待定时器线程调用OSD::sched_scrub
 	  pg->reg_next_scrub();
 	  dout(10) << "marking " << *pg << " for scrub" << dendl;
 	}

@@ -1516,6 +1516,7 @@ void ReplicatedPG::do_request(
     break;
 
   case MSG_OSD_REP_SCRUB:
+  	//primary发送给副本该消息，副本处理函数如下  	
     replica_scrub(op, handle);
     break;
 
@@ -3237,6 +3238,7 @@ void ReplicatedPG::do_sub_op(OpRequestRef op)
       sub_op_scrub_stop(op);
       return;
     case CEPH_OSD_OP_SCRUB_MAP:
+	//primary处理副本发来的scrub校验结果信息
       sub_op_scrub_map(op);
       return;
     }

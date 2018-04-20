@@ -1876,6 +1876,7 @@ bool PGMonitor::preprocess_command(MonOpRequestRef op)
     }
     vector<pg_t> pgs(1);
     pgs[0] = pgid;
+	//发送MOSDScrub消息，响应pg scrub等命令
     mon->try_send_message(new MOSDScrub(mon->monmap->fsid, pgs,
                                         scrubop == "repair",
                                         scrubop == "deep-scrub"),

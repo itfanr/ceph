@@ -2069,6 +2069,7 @@ bool PG::requeue_scrub()
   } else {
     dout(10) << __func__ << ": queueing" << dendl;
     scrub_queued = true;
+	//将自己加入osd的scrub处理队列
     osd->queue_for_scrub(this);
     return true;
   }
@@ -3340,6 +3341,7 @@ void PG::requeue_ops(list<OpRequestRef> &ls)
 bool PG::sched_scrub()
 {
   assert(_lock.is_locked());
+  //首先检查PG的状态，必须是主OSD，并且处于active和clean状态，并且没有正在进行Scrub操作。
   if (!(is_primary() && is_active() && is_clean() && !is_scrubbing())) {
     return false;
   }
@@ -3349,11 +3351,18 @@ bool PG::sched_scrub()
   if (deep_scrub_interval <= 0) {
     deep_scrub_interval = cct->_conf->osd_deep_scrub_interval;
   }
+  //检查是否启动deep_scrub，
+  //如果当前时间大于info.history.last_deep_scrub_stamp与deep_scrub_interval之和，
+  //就启动deep_scrub操作。
   bool time_for_deep = ceph_clock_now(cct) >=
     info.history.last_deep_scrub_stamp + deep_scrub_interval;
 
   bool deep_coin_flip = false;
   // Only add random deep scrubs when NOT user initiated scrub
+  //如果scrubber.must_scrub的值为true，为用户手动强制启动deep_scrub操作。
+  //如果该值为false，则需系统自动以一定的概率来启动deep_scrub操作，
+  //具体实现就是：自动产生一个随机数，
+  //如果该随机数小于cct->_conf->osd_deep_scrub_randomize_ratio，就启动deep_scrub操作。
   if (!scrubber.must_scrub)
       deep_coin_flip = (rand() % 100) < cct->_conf->osd_deep_scrub_randomize_ratio * 100;
   dout(20) << __func__ << ": time_for_deep=" << time_for_deep << " deep_coin_flip=" << deep_coin_flip << dendl;
@@ -3396,7 +3405,8 @@ bool PG::sched_scrub()
     // the scheduling of the scrub/repair (e.g. request reservation)
     scrubber.auto_repair = false;
   }
-
+  
+ // Scrub过程和Recovery过程类似，都需要耗费系统大量资源，需要去PG所在的OSD上预约资源。
   bool ret = true;
   if (!scrubber.reserved) {
     assert(scrubber.reserved_peers.empty());
@@ -3484,6 +3494,9 @@ void PG::sub_op_scrub_map(OpRequestRef op)
   dout(10) << " got " << m->from << " scrub map" << dendl;
   bufferlist::iterator p = m->get_data().begin();
 
+  //将收到的replicas的scrubmap写入到scrubber.received_maps中；
+  //对于所有replicas都返回scrubmap，则调用PG::requeue_scrub()函数重新进入scrub操作
+
   scrubber.received_maps[m->from].decode(p, info.pgid.pool());
   dout(10) << "map version is "
 	     << scrubber.received_maps[m->from].valid_through
@@ -3498,6 +3511,7 @@ void PG::sub_op_scrub_map(OpRequestRef op)
 }
 
 // send scrub v3 messages (chunky scrub)
+//primary发送给副本MOSDRepScrub消息
 void PG::_request_scrub_map(
   pg_shard_t replica, eversion_t version,
   hobject_t start, hobject_t end,
@@ -3506,7 +3520,8 @@ void PG::_request_scrub_map(
   assert(replica != pg_whoami);
   dout(10) << "scrub  requesting scrubmap from osd." << replica
 	   << " deep " << (int)deep << " seed " << seed << dendl;
-  MOSDRepScrub *repscrubop = new MOSDRepScrub(
+  
+    MOSDRepScrub *repscrubop = new MOSDRepScrub(
     spg_t(info.pgid.pgid, replica.shard), version,
     get_osdmap()->get_epoch(),
     start, end, deep, seed);
@@ -3782,6 +3797,7 @@ void PG::_scan_snaps(ScrubMap &smap)
  * build a scrub map over a chunk without releasing the lock
  * only used by chunky scrub
  */
+ //primary和副本都会调用该函数
 int PG::build_scrub_map_chunk(
   ScrubMap &map,
   hobject_t start, hobject_t end, bool deep, uint32_t seed,
@@ -3795,6 +3811,8 @@ int PG::build_scrub_map_chunk(
   // objects
   vector<hobject_t> ls;
   vector<ghobject_t> rollback_obs;
+  //列出所有的start和end范围内的对象，ls队列存放head和snap对象，
+  //rollback_obs队列存放用来回滚的ghobject_t对象
   int ret = get_pgbackend()->objects_list_range(
     start,
     end,
@@ -3805,10 +3823,13 @@ int PG::build_scrub_map_chunk(
     dout(5) << "objects_list_range error: " << ret << dendl;
     return ret;
   }
-
-
+  
+//扫描对象，构建ScrubMap结构
   get_pgbackend()->be_scan_list(map, ls, deep, seed, handle);
+  //调用函数_scan_rollback_obs来检查回滚对象：
+  //如果对象的generation小于last_rollback_info_trimmed_to_applied值，就删除该对象。
   _scan_rollback_obs(rollback_obs, handle);
+  //调用_scan_snaps来修复SnapMapper里保存的snap信息
   _scan_snaps(map);
 
   dout(20) << __func__ << " done" << dendl;
@@ -3871,6 +3892,9 @@ void PG::repair_object(
  * for pushes to complete in case of recent recovery. Build a single
  * scrubmap of objects that are in the range [msg->start, msg->end).
  */
+ //副本的处理函数
+ //当从副本接收到主副本发送来的MOSDRepScrub类型消息，用于获取对象的校验信息时，
+ //就调用函数replica_scrub来完成
 void PG::replica_scrub(
   OpRequestRef op,
   ThreadPool::TPHandle &handle)
@@ -3879,6 +3903,8 @@ void PG::replica_scrub(
   assert(!scrubber.active_rep_scrub);
   dout(7) << "replica_scrub" << dendl;
 
+//检查如果msg->map_epoch的值小于info.history.same_interval_since的值就直接返回。
+//在这里从副本直接丢弃掉过时的MOSDRepScrub请求。
   if (msg->map_epoch < info.history.same_interval_since) {
     dout(10) << "replica_scrub discarding old replica_scrub from "
 	     << msg->map_epoch << " < " << info.history.same_interval_since 
@@ -3889,12 +3915,16 @@ void PG::replica_scrub(
   ScrubMap map;
 
   assert(msg->chunky);
+  //如果last_update_applied的值小于msg->scrub_to的值，
+  //也就是从副本上完成日志应用的操作落后主副本scrub操作的版本，
+  //必须等待它们一致。把当前的op操作保存在scrubber.active_rep_scrub中等待。
   if (last_update_applied < msg->scrub_to) {
     dout(10) << "waiting for last_update_applied to catch up" << dendl;
     scrubber.active_rep_scrub = op;
     return;
   }
 
+//如果active_pushes大于0，表明有Recovery操作正在进行，同样把当前的op操作保存在scrubber.active_rep_scrub中等待
   if (active_pushes > 0) {
     dout(10) << "waiting for active pushes to finish" << dendl;
     scrubber.active_rep_scrub = op;
@@ -3909,6 +3939,7 @@ void PG::replica_scrub(
   if (!end.is_max())
     end.pool = info.pgid.pool();
 
+//否则就调用函数build_scrub_map_chunk来构建ScrubMap，并发送给主副本
   build_scrub_map_chunk(
     map, start, end, msg->deep, msg->seed,
     handle);
@@ -3929,7 +3960,7 @@ void PG::replica_scrub(
     v);
   ::encode(map, subop->get_data());
   subop->ops = scrub;
-
+//副本发送MOSDSubOp消息，将处理结果给primary
   osd->send_message_osd_cluster(subop, msg->get_connection());
 }
 
@@ -3939,6 +3970,9 @@ void PG::replica_scrub(
  * scrub will be chunky if all OSDs in PG support chunky scrub
  * scrub will fail if OSDs are too old.
  */
+ //Scrub的任务由OSD的工作队列OpWq来完成，调用对应的处理函数pg->scrub（handle）来执行
+ //PG::scrub函数最终调用PG::chunky_scrub函数来实现。
+ //PG::chunky_scrub函数控制了Scrub操作状态转换和核心处理过程
 void PG::scrub(epoch_t queued, ThreadPool::TPHandle &handle)
 {
   if (g_conf->osd_scrub_sleep > 0 &&
@@ -4058,6 +4092,8 @@ void PG::scrub(epoch_t queued, ThreadPool::TPHandle &handle)
  * scrubber.state encodes the current state of the scrub (refer to state diagram
  * for details).
  */
+ //Scrub的具体执行过程大致如下：通过比较对象各个OSD上副本的元数据和数据，
+ //来完成元数据和数据的校验。其核心处理流程在函数PG::chunky_scrub里控制完成。
 void PG::chunky_scrub(ThreadPool::TPHandle &handle)
 {
   // check for map changes
@@ -4134,6 +4170,9 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
           unsigned loop = 0;
           while (!boundary_found) {
             vector<hobject_t> objects;
+			//调用get_pgbackend（）->objects_list_partial函数从start对象开始扫描一组对象，
+			//一次扫描的对象数量在如下两个配置参数之间：cct->_conf->osd_scrub_chunk_min（默认值为5）
+			//和cct->_conf->osd_scrub_chunk_max（默认值为25）。			
             ret = get_pgbackend()->objects_list_partial(
 	      start,
 	      cct->_conf->osd_scrub_chunk_min,
@@ -4151,6 +4190,10 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
             }
 
             // search backward from the end looking for a boundary
+            //计算出对象的边界。相同的对象具有相同的哈希值。
+            //从列表后面开始查找哈希值不同的对象，从该地方划界。
+            //这样做的目的是把一个对象的所有相关对象（快照对象、回滚对象）
+            //划分在一次扫描校验过程中。
             objects.push_back(candidate_end);
             while (!boundary_found && objects.size() > 1) {
               hobject_t end = objects.back().get_boundary();
@@ -4168,7 +4211,8 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
               loop = 0;
             }
           }
-
+	//调用函数_range_available_for_scrub检查列表中的对象，如果有被阻塞的对象，
+	//就设置done的值为true，退出PG本次的Scrub过程。	  
 	  if (!_range_available_for_scrub(scrubber.start, candidate_end)) {
 	    // we'll be requeued by whatever made us unavailable for scrub
 	    dout(10) << __func__ << ": scrub blocked somewhere in range "
@@ -4201,6 +4245,7 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
 	     i != actingbackfill.end();
 	     ++i) {
 	  if (*i == pg_whoami) continue;
+	  	//调用函数_request_scrub_map向所有副本发送消息，获取相应ScrubMap的校验信息
           _request_scrub_map(*i, scrubber.subset_last_update,
                              scrubber.start, scrubber.end, scrubber.deep,
 			     scrubber.seed);
@@ -4334,6 +4379,14 @@ void PG::scrub_clear_state()
   _scrub_clear_state();
 }
 
+//pg scrub command 
+/*
+当对象的主副本和从副本都完成了校验信息的构建，
+并保存在相应的结构ScrubMap中，下一步就是对比各个副本的校验信息来完成一致性检查。
+首先通过对象自身的信息来选出一个权威的对象，然后用权威对象和其他对象做比较来检验。
+下面介绍用于比较的函数。
+*/
+//函数scrub_compare_maps实现比较不同的副本信息是否一致
 void PG::scrub_compare_maps() 
 {
   dout(10) << __func__ << " has maps, analyzing" << dendl;
@@ -8074,3 +8127,27 @@ void intrusive_ptr_release(PG *pg) { pg->put("intptr"); }
   uint64_t get_with_id(PG *pg) { return pg->get_with_id(); }
   void put_with_id(PG *pg, uint64_t id) { return pg->put_with_id(id); }
 #endif
+
+/*
+关于pg scrub：
+1. OSD 会以 PG 为粒度触发 Scrub 流程，触发的频率可以通过选项指定，而一个 PG 的 Scrub 启动都是由该 PG 的 Master 角色所在 OSD 启动
+
+2. 一个 PG 在普通的环境下会包含几千个到数十万个不等的对象，因为 Scrub 流程需要提取对象的校验信息然后跟其他副本的校验信息对比，
+这期间被校验对象的数据是不能被修改的。因此一个 PG 的 Scrub 流程每次会启动小部分的对象校验，
+Ceph 会以每个对象名的哈希值的部分作为提取因子，
+每次启动对象校验会找到符合本次哈希值的对象，然后进行比较。这也是 Ceph 称其为 Chunky Scrub 的原因。
+
+3. 在找到待校验对象集后，发起者需要发出请求来锁定其他副本的这部分对象集。因为每个对象的 master 和 replicate 节点在实际写入到
+底层存储引擎的时间会出现一定的差异。
+这时候，待校验对象集的发起者会附带一个版本发送给其他副本，直到这些副本节点与主节点同步到相同版本。
+
+4. 在确定待校验对象集在不同节点都处于相同版本后，发起者会要求所有节点都开始计算这个对象集的校验信息并反馈给发起者。
+
+5. 该校验信息包括每个对象的元信息如大小、扩展属性的所有键和历史版本信息等等，在 Ceph 中被称为 ScrubMap。
+
+6. 发起者会比较多个 ScrubMap并发现不一致的对象，不一致对象会被收集最后发送给 Monitor，最后用户可以通过 Monitor 了解 Scrub 的结果信息
+
+7. 用户在发现出现不一致的对象后，可以通过 “ceph pg repair [pg_id]” 的方式来启动修复进程，目前的修复仅仅会将主节点的对象全量复制到副本节点，
+因此目前要求用户手工确认主节点的对象是”正确副本”。另外，Ceph 允许 Deep Scrub 模式来全量比较对象信息来期望发现 Ceph 本身或者文件系统问题，
+这通常会带来较大的 IO 负担，因此在实际生产环境中很难达到预期效果。
+*/
