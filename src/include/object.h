@@ -29,6 +29,7 @@ using namespace std;
 #include "ceph_hash.h"
 #include "cmp.h"
 
+//结构object_t对应本地文件系统的一个文件，name就是对象名
 struct object_t {
   string name;
 
@@ -131,7 +132,12 @@ inline ostream& operator<<(ostream& out, snapid_t s) {
     return out << hex << s.val << dec;
 }
 
-
+/*
+sobject_t 就是 加了snapshot相关信息的object_t ，
+snap 就是该对象对于的snapshot的以snap 号， 
+这个主要用于快照。如果一个对象不是快照，那么这个对象的snap
+字段就设置为CEPH_NOSNAP，非snapshot对象，ceph称之为该对象对于的 head对象
+*/
 struct sobject_t {
   object_t oid;
   snapid_t snap;

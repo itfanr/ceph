@@ -25,6 +25,7 @@ class CephContext;
 class Context;
 class SafeTimerThread;
 
+//类SafeTimer实现了定时器的功能
 class SafeTimer
 {
   // This class isn't supposed to be copied

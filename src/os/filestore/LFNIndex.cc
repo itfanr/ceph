@@ -142,6 +142,7 @@ int LFNIndex::lookup(const ghobject_t &oid,
   r = _lookup(oid, &path, &short_name, hardlink);
   if (r < 0)
     goto out;
+  //short_name是改编后的对象名字，也就是实际在硬盘上显示的对象名
   string full_path = get_full_path(path, short_name);
   *out_path = std::make_shared<Path>(full_path, this);
   r = 0;
@@ -323,6 +324,7 @@ int LFNIndex::remove_object(const vector<string> &from,
   return lfn_unlink(from, oid, short_name);
 }
 
+//获取改编后的名字的函数
 int LFNIndex::get_mangled_name(const vector<string> &from,
 			       const ghobject_t &oid,
 			       string *mangled_name, int *hardlink)
@@ -715,6 +717,7 @@ string LFNIndex::lfn_generate_object_name_poolless(const ghobject_t &oid)
   return full_name;
 }
 
+//改编名字
 int LFNIndex::lfn_get_name(const vector<string> &path,
 			   const ghobject_t &oid,
 			   string *mangled_name, string *out_path,

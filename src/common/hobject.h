@@ -34,6 +34,7 @@ namespace ceph {
 #define INT64_MIN ((int64_t)0x8000000000000000ll)
 #endif
 
+//hobject_t 是名字应该是 hash object的缩写。 
 struct hobject_t {
   object_t oid;
   snapid_t snap;
@@ -418,6 +419,14 @@ static inline hobject_t MIN_HOBJ(const hobject_t& l, const hobject_t& r, bool bi
 
 typedef version_t gen_t;
 
+/*
+ghobject 在对象hobject_t的基础上，添加了 generation字段 和 shard_id 字段 
+这个主要用于ErasureCode 用于rollback用的。如果是Replicate，
+那么shard_id字段就设置为NO_SHARD(-1)，这两个字段对于replicate是没有用的。
+
+当PG为EC时，写操作需要区分写前后两个版本的object.
+写操作保存对象的上一个版本（generation）的对象，当EC写失败时，可以恢复到上一个版本
+*/
 struct ghobject_t {
   hobject_t hobj;
   gen_t generation;

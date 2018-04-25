@@ -418,9 +418,9 @@ public:
     };
 
     struct Op {
-      __le32 op;
-      __le32 cid;
-      __le32 oid;
+      __le32 op;						// op type
+      __le32 cid;						//
+      __le32 oid;						//
       __le64 off;
       __le64 len;
       __le32 dest_cid;

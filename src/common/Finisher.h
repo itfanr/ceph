@@ -36,6 +36,10 @@ enum {
  * representing callbacks, in a dedicated worker thread. Enqueuing
  * contexts to complete is thread-safe.
  */
+ /*
+类Finisher用来完成回调函数Context的执行，
+其内部有一个FinisherThread线程来用于执行Context回调函数
+*/
 class Finisher {
   CephContext *cct;
   Mutex        finisher_lock; ///< Protects access to queues and finisher_running.

@@ -490,6 +490,9 @@ private:
     ); ///< @return Generated object name.
 
   /// Generate object name
+  // rados对象的名字： 
+  //name+[“head”|”snapdir”|snap] + “_” + hash(十六进制）+ “_” +pool_id 
+  //+ [“_” + generaion +”_” + shard_id]
   string lfn_generate_object_name(
     const ghobject_t &oid ///< [in] Object for which to generate.
     ) {

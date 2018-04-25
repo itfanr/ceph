@@ -334,22 +334,28 @@ void PGLog::proc_replica_log(
 /*
   处理分歧日志的五种情况如下所示：
   
-  情况1： 在没有分歧的日志里查找到该对象，但是已存在的对象的版本大于第一个分歧对象的版本。这种情况的出现，
+  情况1： 在没有分歧的日志里查找到该对象，但是已存在的对象的版本大于
+  第一个分歧对象的版本。这种情况的出现，
   是由于在merge_log中产生权威日志时的日志更新，相应的处理已经做了，这里不做任何处理。
   
-  情况2： 如果prior_version为eversion_t（），为对象的create操作或者是clone操作，那么这个对象就不需要修复。
+  情况2： 如果prior_version为eversion_t()，为对象的create操作或者是clone操作，
+  那么这个对象就不需要修复。
   如果已经在missing记录中，就删除该missing记录。
   
   情况3： 如果该对象已经处于missing列表中，如下进行处理：
   
-  ·如果日志记录显示当前已经拥有的该对象版本have等于prior_version，说明对象不缺失，不需要修复，删除missing中的记录。
+  ·如果日志记录显示当前已经拥有的该对象版本have等于prior_version，说明对象不缺失，
+  不需要修复，删除missing中的记录。
   
-  ·否则，修改需要修复的版本need为prior_version；如果prior_version小于等于info.log_tail时，这是不合理的，
+  ·否则，修改需要修复的版本need为prior_version；
+  如果prior_version小于等于info.log_tail时，这是不合理的，
   设置new_divergent_prior用于后续处理。
   
-  情况4： 如果该对象的所有版本都可以回滚，直接通过本地回滚操作就可以修复，不需要加入missing列表来修复。
+  情况4： 如果该对象的所有版本都可以回滚，直接通过本地回滚操作就可以修复，
+  不需要加入missing列表来修复。
   
-  情况5： 如果不是所有的对象版本都可以回滚，删除相关的版本，把prior_version加入missing记录中用于修复。
+  情况5： 如果不是所有的对象版本都可以回滚，删除相关的版本，
+  把prior_version加入missing记录中用于修复。
 
   */  
 void PGLog::_merge_object_divergent_entries(
@@ -377,8 +383,7 @@ void PGLog::_merge_object_divergent_entries(
 /*  
   通过该对象的日志记录来检查版本是否一致。首先确保是同一个对象，
   本次日志记录的版本prior_version等于上一条日志记录的version值。
-*/
-  
+*/  
   // entries is non-empty
   assert(!entries.empty());
   eversion_t last;
@@ -400,12 +405,10 @@ void PGLog::_merge_object_divergent_entries(
   }
 	   
 /*
-
 版本first_divergent_update为该对象的日志记录中第一个产生分歧的版本；
 版本last_divergent_update为最后一个产生分歧的版本；
 版本prior_version为第一个分歧产生的前一个版本，也就是应该存在的对象版本。
 布尔变量object_not_in_store用来标记该对象不缺失，且第一条分歧日志操作是删除操作。
-
 */
 //entries are ours
   const eversion_t prior_version = entries.begin()->prior_version;
@@ -421,8 +424,9 @@ void PGLog::_merge_object_divergent_entries(
 		     << " last_divergent_update: " << last_divergent_update
 		     << dendl;
 
+  //log记录了所有对象的操作，找出hoid相关的pg_log_entry_t*
   ceph::unordered_map<hobject_t, pg_log_entry_t*>::const_iterator objiter =
-    log.objects.find(hoid);
+    log.objects.find(hoid);  
   if (objiter != log.objects.end() &&
       objiter->second->version >= first_divergent_update) {
     /// Case 1)

@@ -36,7 +36,9 @@
  * The chained keys will have the first xattr's key (with the escaping), and a suffix: "@<id>"
  * where <id> marks the num of xattr in the chain.
  */
-
+/*
+扩展的xattr
+*/
 void get_raw_xattr_name(const char *name, int i, char *raw_name, int raw_len)
 {
   int pos = 0;

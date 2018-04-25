@@ -26,6 +26,12 @@
 /**
  * CollectionIndex provides an interface for manipulating indexed collections
  */
+ 
+ /*
+CollectionIndex是对象在文件系统的组织方式。一个对象，在文件系统就对应一个文件，
+当有很多文件时，如何组织这些文件，比如几层目录，每层目录多少个文件，如何检索，
+这些组织不好都会影响性能。
+*/
 class CollectionIndex {
 protected:
   /**

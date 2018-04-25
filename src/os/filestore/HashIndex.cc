@@ -367,6 +367,7 @@ int HashIndex::_lookup(const ghobject_t &oid,
   vector<string>::iterator next = path_comp.begin();
   int exists;
   while (1) {
+  	//path is base path first
     int r = path_exists(*path, &exists);
     if (r < 0)
       return r;
@@ -795,6 +796,7 @@ int HashIndex::complete_split(const vector<string> &path, subdir_info_s info) {
   return end_split_or_merge(path);
 }
 
+//由对象名获取路径
 void HashIndex::get_path_components(const ghobject_t &oid,
 				    vector<string> *path) {
   char buf[MAX_HASH_LEVEL + 1];

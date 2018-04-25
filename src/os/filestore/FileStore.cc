@@ -185,6 +185,7 @@ int FileStore::lfn_find(const ghobject_t& oid, const Index& index, IndexedPath *
     path = &path2;
   int r, exist;
   assert(NULL != index.index);
+  //HashIndex::lookup
   r = (index.index)->lookup(oid, path, &exist);
   if (r < 0) {
     assert(!m_filestore_fail_eio || r != -EIO);
@@ -1975,7 +1976,7 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
   for (vector<Transaction>::iterator i = tls.begin(); i != tls.end(); ++i) {
     (*i).set_osr(osr);
   }
-//itfanr
+
 /*
   在进行存储数据的时候 肯定是需要记录journal的，
   也就是当数据进行写入的时候需要写到journal中一份，
@@ -2016,7 +2017,7 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
       dout(5) << "queue_transactions (writeahead) " << o->op << " " << o->tls << dendl;
 
       osr->queue_journal(o->op);
-	//itfanr
+	
 	//这时申请一个C_JournaledAhead的回调操作，
 	//这个操作会在日志完成之后进行回调处理处理时会将data写入磁盘。
 	//C_JournaledAhead回调很关键
