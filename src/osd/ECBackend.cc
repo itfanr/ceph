@@ -201,7 +201,7 @@ struct OnRecoveryReadComplete :
     // FIXME???
     assert(res.r == 0);
     assert(res.errors.empty());
-    assert(res.returned.size() == 1);
+    assert(res.returned.size() == 1); //always is 1 in normal
     pg->handle_recovery_read_complete(
       hoid,
       res.returned.back(),
@@ -430,6 +430,7 @@ struct SendPushReplies : public Context {
   }
 };
 
+//用于请求的恢复
 void ECBackend::dispatch_recovery_messages(RecoveryMessages &m, int priority)
 {
   for (map<pg_shard_t, vector<PushOp> >::iterator i = m.pushes.begin();
@@ -473,6 +474,7 @@ void ECBackend::dispatch_recovery_messages(RecoveryMessages &m, int priority)
 
   if (m.reads.empty())
     return;
+  //重新读？？
   start_read_op(
     priority,
     m.reads,
@@ -629,6 +631,7 @@ void ECBackend::run_recovery_op(
     RecoveryOp &op = recovery_ops.insert(make_pair(i->hoid, *i)).first->second;
     continue_recovery_op(op, &m);
   }
+  //处理recovery messages	   
   dispatch_recovery_messages(m, priority);
   delete _h;
 }
@@ -696,6 +699,7 @@ bool ECBackend::handle_message(
     reply->map_epoch = get_parent()->get_epoch();
     handle_sub_read(op->op.from, op->op, &(reply->op));
     op->set_priority(priority);
+	//读完回复
     get_parent()->send_message_osd_cluster(
       op->op.from.osd, reply, get_parent()->get_epoch());
     return true;
@@ -907,6 +911,7 @@ void ECBackend::handle_sub_read(
     for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::iterator j =
 	   i->second.begin(); j != i->second.end(); ++j) {
       bufferlist bl;
+	  //调用filestore里面的读
       r = store->read(
 	ch,
 	ghobject_t(i->first, ghobject_t::NO_GEN, shard),
@@ -1004,6 +1009,7 @@ void ECBackend::handle_sub_read_reply(
   RecoveryMessages *m)
 {
   dout(10) << __func__ << ": reply " << op << dendl;
+  //get ReadOp with tid
   map<ceph_tid_t, ReadOp>::iterator iter = tid_to_read_map.find(op.tid);
   if (iter == tid_to_read_map.end()) {
     //canceled
@@ -1015,50 +1021,56 @@ void ECBackend::handle_sub_read_reply(
 	 op.buffers_read.begin();
        i != op.buffers_read.end();
        ++i) {
-    assert(!op.errors.count(i->first));	// If attribute error we better not have sent a buffer
-    if (!rop.to_read.count(i->first)) {
-      // We canceled this read! @see filter_read_op
-      dout(20) << __func__ << " to_read skipping" << dendl;
-      continue;
-    }
-    list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator req_iter =
-      rop.to_read.find(i->first)->second.to_read.begin();
-    list<
-      boost::tuple<
-	uint64_t, uint64_t, map<pg_shard_t, bufferlist> > >::iterator riter =
-      rop.complete[i->first].returned.begin();
-    for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
-	 j != i->second.end();
-	 ++j, ++req_iter, ++riter) {
-      assert(req_iter != rop.to_read.find(i->first)->second.to_read.end());
-      assert(riter != rop.complete[i->first].returned.end());
-      pair<uint64_t, uint64_t> adjusted =
-	sinfo.aligned_offset_len_to_chunk(
-	  make_pair(req_iter->get<0>(), req_iter->get<1>()));
-      assert(adjusted.first == j->first);
-      riter->get<2>()[from].claim(j->second);
-    }
+	   	//check error with hobject_t
+	    assert(!op.errors.count(i->first));	// If attribute error we better not have sent a buffer
+	    if (!rop.to_read.count(i->first)) {
+	      // We canceled this read! @see filter_read_op
+	      dout(20) << __func__ << " to_read skipping" << dendl;
+	      continue;
+	    }
+
+		//map<hobject_t, read_request_t, hobject_t::BitwiseComparator> to_read;
+  		//map<hobject_t, read_result_t, hobject_t::BitwiseComparator> complete;
+	    list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator req_iter =
+	      rop.to_read.find(i->first)->second.to_read.begin();
+	    list<
+	      boost::tuple<
+		uint64_t, uint64_t, map<pg_shard_t, bufferlist> > >::iterator riter =
+	      rop.complete[i->first].returned.begin();
+	    for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
+		 j != i->second.end();
+		 ++j, ++req_iter, ++riter) {
+	      assert(req_iter != rop.to_read.find(i->first)->second.to_read.end());
+	      assert(riter != rop.complete[i->first].returned.end());
+	      pair<uint64_t, uint64_t> adjusted = sinfo.aligned_offset_len_to_chunk(
+			  make_pair(req_iter->get<0>(), req_iter->get<1>()));
+	      assert(adjusted.first == j->first);
+	      riter->get<2>()[from].claim(j->second);
+	    }
   }
+
+  // check op.attrs
   for (map<hobject_t, map<string, bufferlist>, hobject_t::BitwiseComparator>::iterator i = op.attrs_read.begin();
        i != op.attrs_read.end();
        ++i) {
-    assert(!op.errors.count(i->first));	// if read error better not have sent an attribute
-    if (!rop.to_read.count(i->first)) {
-      // We canceled this read! @see filter_read_op
-      dout(20) << __func__ << " to_read skipping" << dendl;
-      continue;
-    }
-    rop.complete[i->first].attrs = map<string, bufferlist>();
-    (*(rop.complete[i->first].attrs)).swap(i->second);
+	    assert(!op.errors.count(i->first));	// if read error better not have sent an attribute
+	    if (!rop.to_read.count(i->first)) {
+	      // We canceled this read! @see filter_read_op
+	      dout(20) << __func__ << " to_read skipping" << dendl;
+	      continue;
+	    }
+	    rop.complete[i->first].attrs = map<string, bufferlist>();
+	    (*(rop.complete[i->first].attrs)).swap(i->second);
   }
+  // check op.errors and insert it to rop.complete[i->first].errors
   for (map<hobject_t, int, hobject_t::BitwiseComparator>::iterator i = op.errors.begin();
        i != op.errors.end();
        ++i) {
-    rop.complete[i->first].errors.insert(
-      make_pair(
-	from,
-	i->second));
-    dout(20) << __func__ << " shard=" << from << " error=" << i->second << dendl;
+	    rop.complete[i->first].errors.insert(
+	      make_pair(
+		from,
+		i->second));
+	    dout(20) << __func__ << " shard=" << from << " error=" << i->second << dendl;
   }
 
   map<pg_shard_t, set<ceph_tid_t> >::iterator siter =
@@ -1066,18 +1078,19 @@ void ECBackend::handle_sub_read_reply(
   assert(siter != shard_to_read_map.end());
   assert(siter->second.count(op.tid));
   siter->second.erase(op.tid);
-
   assert(rop.in_progress.count(from));
   rop.in_progress.erase(from);
+  
   unsigned is_complete = 0;
   // For redundant reads check for completion as each shard comes in,
   // or in a non-recovery read check for completion once all the shards read.
   if (rop.do_redundant_reads || (!rop.for_recovery && rop.in_progress.empty())) {
+  	//check each rop.complete
     for (map<hobject_t, read_result_t>::const_iterator iter =
         rop.complete.begin();
       iter != rop.complete.end();
       ++iter) {
-      set<int> have;
+      set<int> have; //shard id gotted
       for (map<pg_shard_t, bufferlist>::const_iterator j =
           iter->second.returned.front().get<2>().begin();
         j != iter->second.returned.front().get<2>().end();
@@ -1088,49 +1101,51 @@ void ECBackend::handle_sub_read_reply(
       set<int> want_to_read, dummy_minimum;
       get_want_to_read_shards(&want_to_read);
       int err;
+	  //got error from some shards
       if ((err = ec_impl->minimum_to_decode(want_to_read, have, &dummy_minimum)) < 0) {
-	dout(20) << __func__ << " minimum_to_decode failed" << dendl;
-        if (rop.in_progress.empty()) {
-	  // If we don't have enough copies and we haven't sent reads for all shards
-	  // we can send the rest of the reads, if any.
-	  if (!rop.do_redundant_reads) {
-	    int r = objects_remaining_read_async(iter->first, rop);
-	    if (r == 0) {
-	      // We added to in_progress and not incrementing is_complete
-	      continue;
-	    }
-	    // Couldn't read any additional shards so handle as completed with errors
-	  }
-	  if (rop.complete[iter->first].errors.empty()) {
-	    dout(20) << __func__ << " simply not enough copies err=" << err << dendl;
-	  } else {
-	    // Grab the first error
-	    err = rop.complete[iter->first].errors.begin()->second;
-	    dout(20) << __func__ << ": Use one of the shard errors err=" << err << dendl;
-	  }
-	  rop.complete[iter->first].r = err;
-	  ++is_complete;
-	}
-      } else {
-        assert(rop.complete[iter->first].r == 0);
-	if (!rop.complete[iter->first].errors.empty()) {
-	  if (cct->_conf->osd_read_ec_check_for_errors) {
-	    dout(10) << __func__ << ": Not ignoring errors, use one shard err=" << err << dendl;
-	    err = rop.complete[iter->first].errors.begin()->second;
-            rop.complete[iter->first].r = err;
-	  } else {
-	  	//may case osd to core when some objectes in pg missing
-	    get_parent()->clog_error() << __func__ << ": Error(s) ignored for "
-				       << iter->first << " enough copies available" << "\n";
-	    dout(10) << __func__ << " Error(s) ignored for " << iter->first
-		     << " enough copies available" << dendl;
-	    rop.complete[iter->first].errors.clear();
-	  }
-	}
-	++is_complete;
+		dout(20) << __func__ << " minimum_to_decode failed" << dendl;
+	        if (rop.in_progress.empty()) {
+		  // If we don't have enough copies and we haven't sent reads for all shards
+		  // we can send the rest of the reads, if any.
+		  if (!rop.do_redundant_reads) { //send request to normal osds
+		    int r = objects_remaining_read_async(iter->first, rop);
+		    if (r == 0) {
+		      // We added to in_progress and not incrementing is_complete
+		      continue;
+		    }
+		    // Couldn't read any additional shards so handle as completed with errors
+		  }
+		  if (rop.complete[iter->first].errors.empty()) {
+		    dout(20) << __func__ << " simply not enough copies err=" << err << dendl;
+		  } else {
+		    // Grab the first error
+		    err = rop.complete[iter->first].errors.begin()->second;
+		    dout(20) << __func__ << ": Use one of the shard errors err=" << err << dendl;
+		  }
+		  rop.complete[iter->first].r = err;
+		  ++is_complete;
+		}
+      } else { //check error in rop
+	        assert(rop.complete[iter->first].r == 0);
+		if (!rop.complete[iter->first].errors.empty()) { // where do these errors from ??
+		  if (cct->_conf->osd_read_ec_check_for_errors) {
+		    dout(10) << __func__ << ": Not ignoring errors, use one shard err=" << err << dendl;
+		    err = rop.complete[iter->first].errors.begin()->second;
+	            rop.complete[iter->first].r = err;
+		  } else {
+		  	//may case osd to core when some objectes in pg missing
+		    get_parent()->clog_error() << __func__ << ": Error(s) ignored for "
+					       << iter->first << " enough copies available" << "\n";
+		    dout(10) << __func__ << " Error(s) ignored for " << iter->first
+			     << " enough copies available" << dendl;
+		    rop.complete[iter->first].errors.clear();
+		  }
+		}
+		++is_complete;
       }
     }
   }
+  
   if (rop.in_progress.empty() || is_complete == rop.complete.size()) {
     dout(20) << __func__ << " Complete: " << rop << dendl;
     complete_read_op(rop, m);
@@ -1147,6 +1162,7 @@ void ECBackend::complete_read_op(ReadOp &rop, RecoveryMessages *m)
     rop.complete.begin();
   assert(rop.to_read.size() == rop.complete.size());
   for (; reqiter != rop.to_read.end(); ++reqiter, ++resiter) {
+  	//调用回调函数
     if (reqiter->second.cb) {
       pair<RecoveryMessages *, read_result_t &> arg(
 	m, resiter->second);
@@ -1178,9 +1194,10 @@ void ECBackend::filter_read_op(
   for (map<pg_shard_t, set<hobject_t, hobject_t::BitwiseComparator> >::iterator i = op.source_to_obj.begin();
        i != op.source_to_obj.end();
        ++i) {
+    //取消down状态的osd的请求
     if (osdmap->is_down(i->first.osd)) {
-      to_cancel.insert(i->second.begin(), i->second.end());
-      op.in_progress.erase(i->first);
+      to_cancel.insert(i->second.begin(), i->second.end()); //获取pg相关的对象集合
+      op.in_progress.erase(i->first); //删除这个pg
       continue;
     }
   }
@@ -1188,41 +1205,43 @@ void ECBackend::filter_read_op(
   if (to_cancel.empty())
     return;
 
-  for (map<pg_shard_t, set<hobject_t, hobject_t::BitwiseComparator> >::iterator i = op.source_to_obj.begin();
+  for (map<pg_shard_t, 
+  			set<hobject_t, hobject_t::BitwiseComparator> >::iterator i = op.source_to_obj.begin();
        i != op.source_to_obj.end();
        ) {
-    for (set<hobject_t, hobject_t::BitwiseComparator>::iterator j = i->second.begin();
-	 j != i->second.end();
-	 ) {
-      if (to_cancel.count(*j))
-	i->second.erase(j++);
-      else
-	++j;
-    }
-    if (i->second.empty()) {
-      op.source_to_obj.erase(i++);
-    } else {
-      assert(!osdmap->is_down(i->first.osd));
-      ++i;
-    }
+	    for (set<hobject_t, hobject_t::BitwiseComparator>::iterator j = i->second.begin();
+		 j != i->second.end();
+		 ) {
+	      if (to_cancel.count(*j))
+			i->second.erase(j++); //删除op.source_to_obj中的to_cancel对象
+	      else
+			++j;
+	    }
+	    if (i->second.empty()) { //删除空对象集合的pg_shard_t
+	      op.source_to_obj.erase(i++);
+	    } else {
+	      assert(!osdmap->is_down(i->first.osd));
+	      ++i;
+	    }
   }
 
+	//遍历to_cancel，处理cancel流程
   for (set<hobject_t, hobject_t::BitwiseComparator>::iterator i = to_cancel.begin();
        i != to_cancel.end();
        ++i) {
-    get_parent()->cancel_pull(*i);
+	    get_parent()->cancel_pull(*i);
 
-    assert(op.to_read.count(*i));
-    read_request_t &req = op.to_read.find(*i)->second;
-    dout(10) << __func__ << ": canceling " << req
-	     << "  for obj " << *i << dendl;
-    assert(req.cb);
-    delete req.cb;
-    req.cb = NULL;
+	    assert(op.to_read.count(*i));
+	    read_request_t &req = op.to_read.find(*i)->second;
+	    dout(10) << __func__ << ": canceling " << req
+		     << "  for obj " << *i << dendl;
+	    assert(req.cb);
+	    delete req.cb;
+	    req.cb = NULL;
 
-    op.to_read.erase(*i);
-    op.complete.erase(*i);
-    recovery_ops.erase(*i);
+	    op.to_read.erase(*i); //删除要读的对象
+	    op.complete.erase(*i);
+	    recovery_ops.erase(*i);
   }
 
   if (op.in_progress.empty()) {
@@ -1251,7 +1270,7 @@ void ECBackend::check_recovery_sources(const OSDMapRef osdmap)
        ++i) {
     map<ceph_tid_t, ReadOp>::iterator j = tid_to_read_map.find(*i);
     assert(j != tid_to_read_map.end());
-    filter_read_op(osdmap, j->second);
+    filter_read_op(osdmap, j->second); //clear op in progress
   }
 }
 
@@ -1263,6 +1282,7 @@ void ECBackend::on_change()
   for (map<ceph_tid_t, ReadOp>::iterator i = tid_to_read_map.begin();
        i != tid_to_read_map.end();
        ++i) {
+    //取消当前的请求，不清除tid？
     dout(10) << __func__ << ": cancelling " << i->second << dendl;
     for (map<hobject_t, read_request_t, hobject_t::BitwiseComparator>::iterator j =
 	   i->second.to_read.begin();
@@ -1545,6 +1565,7 @@ int ECBackend::get_remaining_shards(
   return 0;
 }
 
+//处理读请求
 void ECBackend::start_read_op(
   int priority,
   map<hobject_t, read_request_t, hobject_t::BitwiseComparator> &to_read,
@@ -1569,37 +1590,37 @@ void ECBackend::start_read_op(
        ++i) {
     list<boost::tuple<
       uint64_t, uint64_t, map<pg_shard_t, bufferlist> > > &reslist =
-      op.complete[i->first].returned;
+      op.complete[i->first].returned; // 还没开始读，已经有complete的？
     bool need_attrs = i->second.want_attrs;
     for (set<pg_shard_t>::const_iterator j = i->second.need.begin();
 	 j != i->second.need.end();
 	 ++j) {
-      if (need_attrs) {
-	messages[*j].attrs_to_read.insert(i->first);
-	need_attrs = false;
-      }
-      op.obj_to_source[i->first].insert(*j);
-      op.source_to_obj[*j].insert(i->first);
+	      if (need_attrs) {
+		messages[*j].attrs_to_read.insert(i->first);
+		need_attrs = false;
+	      }
+	      op.obj_to_source[i->first].insert(*j);
+	      op.source_to_obj[*j].insert(i->first);
     }
     for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
 	   i->second.to_read.begin();
 	 j != i->second.to_read.end();
 	 ++j) {
-      reslist.push_back(
-	boost::make_tuple(
-	  j->get<0>(),
-	  j->get<1>(),
-	  map<pg_shard_t, bufferlist>()));
-      pair<uint64_t, uint64_t> chunk_off_len =
-	sinfo.aligned_offset_len_to_chunk(make_pair(j->get<0>(), j->get<1>()));
-      for (set<pg_shard_t>::const_iterator k = i->second.need.begin();
-	   k != i->second.need.end();
-	   ++k) {
-	messages[*k].to_read[i->first].push_back(boost::make_tuple(chunk_off_len.first,
-								    chunk_off_len.second,
-								    j->get<2>()));
-      }
-      assert(!need_attrs);
+	      reslist.push_back(
+		boost::make_tuple(
+		  j->get<0>(),
+		  j->get<1>(),
+		  map<pg_shard_t, bufferlist>())); //
+	      pair<uint64_t, uint64_t> chunk_off_len =
+		sinfo.aligned_offset_len_to_chunk(make_pair(j->get<0>(), j->get<1>()));
+	      for (set<pg_shard_t>::const_iterator k = i->second.need.begin();
+		   k != i->second.need.end();
+		   ++k) {
+		messages[*k].to_read[i->first].push_back(boost::make_tuple(chunk_off_len.first,
+									    chunk_off_len.second,
+									    j->get<2>()));
+	      }
+	      assert(!need_attrs);
     }
   }
 
@@ -1609,6 +1630,7 @@ void ECBackend::start_read_op(
     op.in_progress.insert(i->first);
     shard_to_read_map[i->first].insert(op.tid);
     i->second.tid = tid;
+	//发送到该pg的相关的osd
     MOSDECSubOpRead *msg = new MOSDECSubOpRead;
     msg->set_priority(priority);
     msg->pgid = spg_t(
@@ -1860,6 +1882,8 @@ struct CallClientContexts :
     const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		    pair<bufferlist*, Context*> > > &to_read)
     : ec(ec), status(status), to_read(to_read) {}
+
+  //
   void finish(pair<RecoveryMessages *, ECBackend::read_result_t &> &in) {
     ECBackend::read_result_t &res = in.second;
     if (res.r != 0)
@@ -1925,6 +1949,7 @@ out:
   }
 };
 
+//处理写请求
 void ECBackend::objects_read_async(
   const hobject_t &hoid,
   const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
@@ -1969,7 +1994,8 @@ void ECBackend::objects_read_async(
 	shards,
 	false,
 	c)));
-
+  
+  //处理写请求
   start_read_op(
     CEPH_MSG_PRIO_DEFAULT,
     for_read_op,

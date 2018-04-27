@@ -1095,6 +1095,8 @@ void Objecter::_scan_requests(OSDSession *s,
   }
 }
 
+//客户端检测到了osdmap变化
+
 void Objecter::handle_osd_map(MOSDMap *m)
 {
   shunique_lock sul(rwlock, acquire_unique);
@@ -1171,11 +1173,13 @@ void Objecter::handle_osd_map(MOSDMap *m)
 
 	cluster_full = cluster_full || _osdmap_full_flag();
 	update_pool_full_map(pool_full_map);
+	 // 扫描需要重发的请求
 	_scan_requests(homeless_session, skipped_map, cluster_full,
 		       &pool_full_map, need_resend,
 		       need_resend_linger, need_resend_command, sul);
 
 	// osd addr changes?
+	//重发请求 
 	for (map<int,OSDSession*>::iterator p = osd_sessions.begin();
 	     p != osd_sessions.end(); ) {
 	  OSDSession *s = p->second;

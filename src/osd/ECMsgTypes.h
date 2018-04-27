@@ -110,11 +110,11 @@ struct ECSubRead {
 WRITE_CLASS_ENCODER_FEATURES(ECSubRead)
 
 struct ECSubReadReply {
-  pg_shard_t from;
+  pg_shard_t from; 
   ceph_tid_t tid;
   map<hobject_t, list<pair<uint64_t, bufferlist> >, hobject_t::BitwiseComparator> buffers_read;
   map<hobject_t, map<string, bufferlist>, hobject_t::BitwiseComparator> attrs_read;
-  map<hobject_t, int, hobject_t::BitwiseComparator> errors;
+  map<hobject_t, int, hobject_t::BitwiseComparator> errors; // erros about a hobject_t
   void encode(bufferlist &bl) const;
   void decode(bufferlist::iterator &bl);
   void dump(Formatter *f) const;

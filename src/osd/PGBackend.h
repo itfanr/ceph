@@ -57,7 +57,7 @@ struct shard_info_wrapper;
     * implementation holding a lock and that the callbacks are
     * called under the same locks.
     */
-   class Listener {
+   class Listener { //implements: ReplicatedPG
    public:
      /// Recovery
 
@@ -235,7 +235,7 @@ struct shard_info_wrapper;
 
      virtual ~Listener() {}
    };
-   Listener *parent;
+   Listener *parent; //ReplicatedPG
    Listener *get_parent() const { return parent; }
    PGBackend(Listener *l, ObjectStore *store, coll_t coll,
 	     ObjectStore::CollectionHandle &ch) :

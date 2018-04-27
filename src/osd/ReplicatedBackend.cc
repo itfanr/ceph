@@ -231,6 +231,7 @@ void ReplicatedBackend::clear_recovery_state()
   pull_from_peer.clear();
 }
 
+//该函数会把正在处理的请求从in_progress_ops中删除。
 void ReplicatedBackend::on_change()
 {
   dout(10) << __func__ << dendl;
@@ -271,6 +272,7 @@ struct AsyncReadCallback : public GenContext<ThreadPool::TPHandle&> {
     delete c;
   }
 };
+
 void ReplicatedBackend::objects_read_async(
   const hobject_t &hoid,
   const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,

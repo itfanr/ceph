@@ -114,6 +114,7 @@ struct OnReadComplete : public Context {
 void ReplicatedPG::OpContext::start_async_reads(ReplicatedPG *pg)
 {
   inflightreads = 1;
+  //处理写请求
   pg->pgbackend->objects_read_async(
     obc->obs.oi.soid,
     pending_async_reads,
@@ -2950,7 +2951,7 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
     tracepoint(osd, prepare_tx_enter, reqid.name._type,
         reqid.name._num, reqid.tid, reqid.inc);
   }
-//itfanr
+
 //将 ops上要写入的数据全部都按着结构保存在transaction的data_bl，op_bl中。
 //拿着这个transaction 就已经获得了全部的操作和数据，
 //这也就是将ops与Transaction绑定的结果。
@@ -3015,7 +3016,7 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
       complete_read_ctx(result, ctx);
     } else {
       in_progress_async_reads.push_back(make_pair(op, ctx));
-      ctx->start_async_reads(this);
+      ctx->start_async_reads(this); //处理写请求
     }
 
     return;

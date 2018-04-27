@@ -5002,6 +5002,22 @@ void PG::reset_interval_flush()
   }
 }
 
+/*
+
+当一个osd发送crash时（无论何种原因），通过Heartbeat机制，
+Monitor会检查到该osd的状态，并把该状态通过OSDMap推送给集群中其它的节点。
+相应的PG在peering的过程中，会首先丢弃正在处理请求。
+
+例如上述的例子：
+
+当一个osd2或者osd4发生crash时，通过hearbeat等机制，
+该osd的状态会上报给monitor，当monitor判断该osd处于down状态，
+会把最新的osdmap推送给各个osd。当osd1收到该osdmap后，pg1.1发现自己的osd 列表发生了变化，
+就会重新发起peering过程。其会调用函数：PG::start_peering_interval， 
+该函数调用了ReplicatedBackend::on_change()，该函数会把正在处理的请求从in_progress_ops中删除。
+
+*/
+
 /* Called before initializing peering during advance_map */
 void PG::start_peering_interval(
   const OSDMapRef lastmap,
