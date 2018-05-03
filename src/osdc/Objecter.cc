@@ -934,6 +934,7 @@ bool Objecter::ms_dispatch(Message *m)
 
   switch (m->get_type()) {
     // these we exlusively handle
+    //客户端处理osd的回复
   case CEPH_MSG_OSD_OPREPLY:
     handle_osd_op_reply(static_cast<MOSDOpReply*>(m));
     return true;
@@ -3295,6 +3296,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
       **pr = ceph_to_host_errno(p->rval);
     if (*ph) {
       ldout(cct, 10) << " op " << i << " handler " << *ph << dendl;
+	  //如何处理的数据？
       (*ph)->complete(ceph_to_host_errno(p->rval));
       *ph = NULL;
     }
@@ -3334,7 +3336,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   // done with this tid?
   if (!op->onack && !op->oncommit && !op->oncommit_sync) {
     ldout(cct, 15) << "handle_osd_op_reply completed tid " << tid << dendl;
-    _finish_op(op, 0);
+    _finish_op(op, 0);//处理op的回复消息
   }
 
   ldout(cct, 5) << num_unacked.read() << " unacked, " << num_uncommitted.read()

@@ -31,6 +31,9 @@
 
 class OSD;
 
+//MOSDOp 封装的操作都是关于oid相关的操作，
+//也就是说，一个MOSDOp只封装针对同一个oid 的操作。但是对于rados_clone_range这样的操作，
+//有一个dest oid，还有一个src oid，那么src oid 就保存在OSDOp的soid中。
 class MOSDOp : public Message {
 
   static const int HEAD_VERSION = 7;

@@ -76,6 +76,7 @@ namespace Scrub {
   class Store;
 }
 
+//implements for intrusive_ptr
 void intrusive_ptr_add_ref(PG *pg);
 void intrusive_ptr_release(PG *pg);
 

@@ -1187,6 +1187,7 @@ public:
 
   struct OSDSession;
 
+  //该结构封装了对象所在的而PG，以及PG对应的OSD列表等信息。  
   struct op_target_t {
     int flags;
     object_t base_oid;

@@ -111,10 +111,21 @@ struct OnReadComplete : public Context {
 };
 
 // OpContext
+/*
+pending_async_reads队列
+ctx->pending_async_reads.push_back(
+  make_pair(
+	boost::make_tuple(op.extent.offset, op.extent.length, op.flags),
+	make_pair(&osd_op.outdata,
+	  new FillInVerifyExtent(&op.extent.length, &osd_op.rval,
+		  &osd_op.outdata, maybe_crc, oi.size, osd,
+		  soid, op.flags))));
+*/
 void ReplicatedPG::OpContext::start_async_reads(ReplicatedPG *pg)
 {
   inflightreads = 1;
-  //处理写请求
+  //处理读请求
+  //从pending_async_reads队列中获取请求
   pg->pgbackend->objects_read_async(
     obc->obs.oi.soid,
     pending_async_reads,
@@ -125,6 +136,7 @@ void ReplicatedPG::OpContext::finish_read(ReplicatedPG *pg)
 {
   assert(inflightreads > 0);
   --inflightreads;
+  //如果inflightreads为0，则说明异步读完成
   if (async_reads_complete()) {
     assert(pg->in_progress_async_reads.size());
     assert(pg->in_progress_async_reads.front().second == this);
@@ -3012,6 +3024,9 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
     if (result == 0)
       do_osd_op_effects(ctx, m->get_connection());
 
+	//检查是否有pending状态的读请求？
+	//如果有，则加入异步读线程的队列，继续读
+	//如果没有，则完成读请求
     if (ctx->pending_async_reads.empty()) {
       complete_read_ctx(result, ctx);
     } else {
@@ -4218,6 +4233,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	break;
       }
       // fall through
+      //处理读请求
     case CEPH_OSD_OP_READ:
       ++ctx->num_read;
       {
@@ -4247,7 +4263,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  // read size was trimmed to zero and it is expected to do nothing
 	  // a read operation of 0 bytes does *not* do nothing, this is why
 	  // the trimmed_read boolean is needed
-	} else if (pool.info.require_rollback()) {
+	} else if (pool.info.require_rollback()) {//纠删
 	  async = true;
 	  boost::optional<uint32_t> maybe_crc;
 	  // If there is a data digest and it is possible we are reading
@@ -4256,6 +4272,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  if (oi.is_data_digest() && op.extent.offset == 0 &&
 	      op.extent.length >= oi.size)
 	    maybe_crc = oi.data_digest;
+	  //加入pending_async_reads队列
 	  ctx->pending_async_reads.push_back(
 	    make_pair(
 	      boost::make_tuple(op.extent.offset, op.extent.length, op.flags),
@@ -6878,6 +6895,7 @@ void ReplicatedPG::apply_ctx_stats(OpContext *ctx, bool scrub_ok)
   }
 }
 
+//最终回复客户端读请求
 void ReplicatedPG::complete_read_ctx(int result, OpContext *ctx)
 {
   MOSDOp *m = static_cast<MOSDOp*>(ctx->op->get_req());
@@ -6890,6 +6908,7 @@ void ReplicatedPG::complete_read_ctx(int result, OpContext *ctx)
     }
     ctx->bytes_read += p->outdata.length();
   }
+  //什么时候填充的outdata？
   ctx->reply->claim_op_out_data(ctx->ops);
   ctx->reply->get_header().data_off = ctx->data_off;
 

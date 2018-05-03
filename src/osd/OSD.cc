@@ -6504,6 +6504,7 @@ void OSD::note_up_osd(int peer)
   service.forget_peer_epoch(peer, osdmap->get_epoch() - 1);
 }
 
+//callback called in handle_osd_map()
 struct C_OnMapCommit : public Context {
   OSD *osd;
   epoch_t first, last;
@@ -7162,7 +7163,8 @@ bool OSD::advance_pg(
 void OSD::consume_map()
 {
   assert(osd_lock.is_locked());
-  dout(7) << "consume_map version " << osdmap->get_epoch() << dendl;
+  //osdmap: epoch  pg:version
+  dout(7) << "consume_map version " << osdmap->get_epoch() << dendl; 
 
   int num_pg_primary = 0, num_pg_replica = 0, num_pg_stray = 0;
   list<PGRef> to_remove;
@@ -7180,12 +7182,13 @@ void OSD::consume_map()
       else if (pg->is_replica())
         num_pg_replica++;
       else
-        num_pg_stray++;
+        num_pg_stray++; //游离状态的pg
 
       if (!osdmap->have_pg_pool(pg->info.pgid.pool())) {
         //pool is deleted!
         to_remove.push_back(PGRef(pg));
       } else {
+       // split pg?? 没看懂
         service.init_splits_between(it->first, service.get_osdmap(), osdmap);
       }
 
@@ -7193,12 +7196,14 @@ void OSD::consume_map()
     }
   }
 
+ //typedef boost::intrusive_ptr<PG> PGRef;
   for (list<PGRef>::iterator i = to_remove.begin();
        i != to_remove.end();
        to_remove.erase(i++)) {
     RWLock::WLocker locker(pg_map_lock);
     (*i)->lock();
-    _remove_pg(&**i);
+	//从pg_map中删除这个pg
+    _remove_pg(&**i);//OSD::_remove_pg(PG *pg)
     (*i)->unlock();
   }
   to_remove.clear();
@@ -7223,11 +7228,11 @@ void OSD::consume_map()
       for (set<Session*>::iterator i = concerned_sessions.begin();
 	   i != concerned_sessions.end();
 	   ++i) {
-	{
-	  Mutex::Locker l((*i)->session_dispatch_lock);
-	  session_notify_pg_cleared(*i, osdmap, *p);
-	}
-	(*i)->put();
+		{
+		  Mutex::Locker l((*i)->session_dispatch_lock);
+		  session_notify_pg_cleared(*i, osdmap, *p);
+		}
+		(*i)->put();
       }
     }
   }

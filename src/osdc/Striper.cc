@@ -74,6 +74,15 @@ void Striper::file_to_extents(
   uint64_t cur = offset;
   uint64_t left = len;
   while (left > 0) {
+
+  /*
+	 cur就是读写IO的 offset，su就是4M大小。  cur/su，得到的bockno即为对象的序号，
+
+     stripe_count为1, stripes_per_object 为 1。 最后算出objectno，即为最终的序号。
+
+     最后通过字符串拼接，把block_name_prefix + objectno=  oid
+  */
+  
     // layout into objects
     uint64_t blockno = cur / su; // which block
     // which horizontal stripe (Y)
@@ -130,6 +139,7 @@ void Striper::file_to_extents(
       ldout(cct, 20) << " adding in to " << *ex << dendl;
       ex->length += x_len;
     }
+	//按照4M大小对业务系统IO切割后，把对象的偏移值写入ObjectExtent类的对象ex。
     ex->buffer_extents.push_back(make_pair(cur - offset + buffer_offset,
 					   x_len));
 

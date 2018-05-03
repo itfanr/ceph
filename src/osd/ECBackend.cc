@@ -1003,6 +1003,7 @@ void ECBackend::handle_sub_write_reply(
   check_op(&(i->second));
 }
 
+//主osd处理读请求
 void ECBackend::handle_sub_read_reply(
   pg_shard_t from,
   ECSubReadReply &op,
@@ -1017,8 +1018,8 @@ void ECBackend::handle_sub_read_reply(
     return;
   }
   ReadOp &rop = iter->second;
-  for (map<hobject_t, list<pair<uint64_t, bufferlist> >, hobject_t::BitwiseComparator>::iterator i =
-	 op.buffers_read.begin();
+  for (map<hobject_t, list<pair<uint64_t, bufferlist> >, 
+  	hobject_t::BitwiseComparator>::iterator i =	 op.buffers_read.begin();
        i != op.buffers_read.end();
        ++i) {
 	   	//check error with hobject_t
@@ -1154,6 +1155,7 @@ void ECBackend::handle_sub_read_reply(
   }
 }
 
+//读完成，调用回调函数
 void ECBackend::complete_read_op(ReadOp &rop, RecoveryMessages *m)
 {
   map<hobject_t, read_request_t, hobject_t::BitwiseComparator>::iterator reqiter =
@@ -1575,6 +1577,7 @@ void ECBackend::start_read_op(
 {
   ceph_tid_t tid = get_parent()->get_tid();
   assert(!tid_to_read_map.count(tid));
+  //tid_to_read_map新增一个kv，并获取引用！
   ReadOp &op(tid_to_read_map[tid]);
   op.priority = priority;
   op.tid = tid;
@@ -1585,7 +1588,8 @@ void ECBackend::start_read_op(
   dout(10) << __func__ << ": starting " << op << dendl;
 
   map<pg_shard_t, ECSubRead> messages;
-  for (map<hobject_t, read_request_t, hobject_t::BitwiseComparator>::iterator i = op.to_read.begin();
+  for (map<hobject_t, 
+  		read_request_t, hobject_t::BitwiseComparator>::iterator i = op.to_read.begin();
        i != op.to_read.end();
        ++i) {
     list<boost::tuple<
@@ -1870,6 +1874,16 @@ int ECBackend::objects_read_sync(
   return -EOPNOTSUPP;
 }
 
+//to_read为pending_async_reads队列
+/*
+ctx->pending_async_reads.push_back(
+  make_pair(
+	boost::make_tuple(op.extent.offset, op.extent.length, op.flags),
+	make_pair(&osd_op.outdata,
+	  new FillInVerifyExtent(&op.extent.length, &osd_op.rval,
+		  &osd_op.outdata, maybe_crc, oi.size, osd,
+		  soid, op.flags))));
+*/
 struct CallClientContexts :
   public GenContext<pair<RecoveryMessages*, ECBackend::read_result_t& > &> {
   ECBackend *ec;
@@ -1895,37 +1909,37 @@ struct CallClientContexts :
 		   pair<bufferlist*, Context*> > >::iterator i = to_read.begin();
 	 i != to_read.end();
 	 to_read.erase(i++)) {
-      pair<uint64_t, uint64_t> adjusted =
-	ec->sinfo.offset_len_to_stripe_bounds(make_pair(i->first.get<0>(), i->first.get<1>()));
-      assert(res.returned.front().get<0>() == adjusted.first &&
-	     res.returned.front().get<1>() == adjusted.second);
-      map<int, bufferlist> to_decode;
-      bufferlist bl;
-      for (map<pg_shard_t, bufferlist>::iterator j =
-	     res.returned.front().get<2>().begin();
-	   j != res.returned.front().get<2>().end();
-	   ++j) {
-	to_decode[j->first.shard].claim(j->second);
-      }
-      int r = ECUtil::decode(
-	ec->sinfo,
-	ec->ec_impl,
-	to_decode,
-	&bl);
-      if (r < 0) {
-        res.r = r;
-        goto out;
-      }
-      assert(i->second.second);
-      assert(i->second.first);
-      i->second.first->substr_of(
-	bl,
-	i->first.get<0>() - adjusted.first,
-	MIN(i->first.get<1>(), bl.length() - (i->first.get<0>() - adjusted.first)));
-      if (i->second.second) {
-	i->second.second->complete(i->second.first->length());
-      }
-      res.returned.pop_front();
+	      pair<uint64_t, uint64_t> adjusted =
+		ec->sinfo.offset_len_to_stripe_bounds(make_pair(i->first.get<0>(), i->first.get<1>()));
+	      assert(res.returned.front().get<0>() == adjusted.first &&
+		     res.returned.front().get<1>() == adjusted.second);
+	      map<int, bufferlist> to_decode;
+	      bufferlist bl;
+	      for (map<pg_shard_t, bufferlist>::iterator j =
+		     res.returned.front().get<2>().begin();
+		   j != res.returned.front().get<2>().end();
+		   ++j) {
+			to_decode[j->first.shard].claim(j->second);
+	      }
+	      int r = ECUtil::decode(
+			ec->sinfo,
+			ec->ec_impl,
+			to_decode,
+			&bl);
+	      if (r < 0) {
+	        res.r = r;
+	        goto out;
+	      }
+	      assert(i->second.second);
+	      assert(i->second.first);
+		  //填充bufferlist*，也就是真实数据
+	      i->second.first->substr_of(
+		bl,	i->first.get<0>() - adjusted.first,
+		MIN(i->first.get<1>(), bl.length() - (i->first.get<0>() - adjusted.first)));
+	      if (i->second.second) {
+			i->second.second->complete(i->second.first->length());
+	      }
+	      res.returned.pop_front();
     }
 out:
     status->complete = true;
@@ -1949,7 +1963,19 @@ out:
   }
 };
 
-//处理写请求
+//处理读请求
+//to_read为pending_async_reads队列
+/*
+ctx->pending_async_reads.push_back(
+  make_pair(
+	boost::make_tuple(op.extent.offset, op.extent.length, op.flags),
+	make_pair(&osd_op.outdata,
+	  new FillInVerifyExtent(&op.extent.length, &osd_op.rval,
+		  &osd_op.outdata, maybe_crc, oi.size, osd,
+		  soid, op.flags))));
+*/
+//读取某个对象，从多个shards读
+//to_read的 bufferlist* 就是&osd_op.outdata
 void ECBackend::objects_read_async(
   const hobject_t &hoid,
   const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
@@ -1961,6 +1987,9 @@ void ECBackend::objects_read_async(
   CallClientContexts *c = new CallClientContexts(
     this, &(in_progress_client_reads.back()), to_read);
 
+  //计算读取偏移量？
+  //没看懂
+  //问题：to_read的second是在哪里处理的？
   list<boost::tuple<uint64_t, uint64_t, uint32_t> > offsets;
   pair<uint64_t, uint64_t> tmp;
   for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
@@ -1976,6 +2005,7 @@ void ECBackend::objects_read_async(
   get_want_to_read_shards(&want_to_read);
     
   set<pg_shard_t> shards;
+  //获取hoid所在的shards
   int r = get_min_avail_to_read_shards(
     hoid,
     want_to_read,
@@ -1985,6 +2015,7 @@ void ECBackend::objects_read_async(
   assert(r == 0);
 
   map<hobject_t, read_request_t, hobject_t::BitwiseComparator> for_read_op;
+  //构造read_request_t
   for_read_op.insert(
     make_pair(
       hoid,
@@ -2004,7 +2035,7 @@ void ECBackend::objects_read_async(
   return;
 }
 
-
+//有些osd读取失败，读取其余的正常的osd
 int ECBackend::objects_remaining_read_async(
   const hobject_t &hoid,
   ReadOp &rop)
@@ -2027,6 +2058,8 @@ int ECBackend::objects_remaining_read_async(
   GenContext<pair<RecoveryMessages *, read_result_t& > &> *c = rop.to_read.find(hoid)->second.cb;
 
   map<hobject_t, read_request_t, hobject_t::BitwiseComparator> for_read_op;
+  //构造读请求，hoid和read_request_t
+  //c代表回调读函数
   for_read_op.insert(
     make_pair(
       hoid,

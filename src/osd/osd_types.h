@@ -4070,7 +4070,7 @@ struct ScrubMap {
 WRITE_CLASS_ENCODER(ScrubMap::object)
 WRITE_CLASS_ENCODER(ScrubMap)
 
-
+//读写OSD的op操作
 struct OSDOp {
   ceph_osd_op op;
   sobject_t soid;
