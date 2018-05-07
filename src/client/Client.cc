@@ -3667,6 +3667,7 @@ bool Client::_flush(Inode *in, Context *onfinish)
     return true;
   }
 
+  //池子已经满了
   if (objecter->osdmap_pool_full(in->layout.pool_id)) {
     ldout(cct, 1) << __func__ << ": FULL, purging for ENOSPC" << dendl;
     objectcacher->purge_set(&in->oset);
@@ -8704,7 +8705,7 @@ int Client::_fsync(Inode *in, bool syncdataonly)
     lock.Lock();
     ldout(cct, 15) << "waiting on data to flush" << dendl;
     while (!done)
-      cond.Wait(lock);
+      cond.Wait(lock); // 耗时
     lock.Unlock();
     client_lock.Lock();
     ldout(cct, 15) << "got " << r << " from flush writeback" << dendl;
@@ -8713,13 +8714,13 @@ int Client::_fsync(Inode *in, bool syncdataonly)
     while (in->cap_refs[CEPH_CAP_FILE_BUFFER] > 0) {
       ldout(cct, 10) << "ino " << in->ino << " has " << in->cap_refs[CEPH_CAP_FILE_BUFFER]
 		     << " uncommitted, waiting" << dendl;
-      wait_on_list(in->waitfor_commit);
+      wait_on_list(in->waitfor_commit); 
     }
   }
 
   if (!r) {
     if (flush_tid > 0)
-      wait_sync_caps(in, flush_tid);
+      wait_sync_caps(in, flush_tid);// 耗时
 
     ldout(cct, 10) << "ino " << in->ino << " has no uncommitted writes" << dendl;
   } else {

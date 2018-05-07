@@ -2188,6 +2188,7 @@ public:
     o->reqid = reqid;
     return o;
   }
+	//fsync操作
   ceph_tid_t mutate(
     const object_t& oid, const object_locator_t& oloc,
     ObjectOperation& op, const SnapContext& snapc,
@@ -2197,7 +2198,7 @@ public:
     Op *o = prepare_mutate_op(oid, oloc, op, snapc, mtime, flags, onack,
 			      oncommit, objver, reqid);
     ceph_tid_t tid;
-    op_submit(o, &tid);
+    op_submit(o, &tid);//提交，刷数据
     return tid;
   }
   Op *prepare_read_op(

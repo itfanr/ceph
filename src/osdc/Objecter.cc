@@ -934,7 +934,7 @@ bool Objecter::ms_dispatch(Message *m)
 
   switch (m->get_type()) {
     // these we exlusively handle
-    //客户端处理osd的回复
+    // 客户端处理osd的回复
   case CEPH_MSG_OSD_OPREPLY:
     handle_osd_op_reply(static_cast<MOSDOpReply*>(m));
     return true;
@@ -1311,7 +1311,6 @@ void Objecter::handle_osd_map(MOSDMap *m)
 }
 
 // op pool check
-
 void Objecter::C_Op_Map_Latest::finish(int r)
 {
   if (r == -EAGAIN || r == -ECANCELED)
@@ -1463,6 +1462,7 @@ void Objecter::_send_op_map_check(Op *op)
     op->get();
     check_latest_map_ops[op->tid] = op;
     C_Op_Map_Latest *c = new C_Op_Map_Latest(this, op->tid);
+	//获取osdmap并回调
     monc->get_version("osdmap", &c->latest, NULL, c);
   }
 }
@@ -2265,9 +2265,9 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   assert(op->session == NULL);
   OSDSession *s = NULL;
 
+  //检查什么？
   bool const check_for_latest_map = _calc_target(&op->target,
-						 &op->last_force_resend)
-    == RECALC_OP_TARGET_POOL_DNE;
+						 &op->last_force_resend) == RECALC_OP_TARGET_POOL_DNE;
 
   // Try to get a session, including a retry if we need to take write lock
   int r = _get_session(op->target.osd, &s, sul);
@@ -2285,7 +2285,7 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
     sul.unlock();
     sul.lock();
   }
-
+  //增加一个统计
   _send_op_account(op);
 
   // send?
@@ -2339,7 +2339,7 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   _session_op_assign(s, op);
 
   if (need_send) {
-    _send_op(op, m);
+    _send_op(op, m); //发送这个op给OSD
   }
 
   // Last chance to touch Op here, after giving up session lock it can
@@ -3141,6 +3141,7 @@ void Objecter::unregister_op(Op *op)
 }
 
 /* This function DOES put the passed message before returning */
+// 处理从osd获取的回复信息
 void Objecter::handle_osd_op_reply(MOSDOpReply *m)
 {
   ldout(cct, 10) << "in handle_osd_op_reply" << dendl;

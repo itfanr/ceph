@@ -1006,6 +1006,7 @@ void ObjectCacher::bh_write(BufferHead *bh)
   mark_tx(bh);
 }
 
+// 回调：处理从osd获取的commit消息，对应每个对象
 void ObjectCacher::bh_write_commit(int64_t poolid, sobject_t oid,
 				   vector<pair<loff_t, uint64_t> >& ranges,
 				   ceph_tid_t tid, int r)
@@ -1033,9 +1034,9 @@ void ObjectCacher::bh_write_commit(int64_t poolid, sobject_t oid,
 
       if (writeback_handler.may_copy_on_write(ob->get_oid(), start, length,
 					      ob->get_snap())) {
-	ldout(cct, 10) << "bh_write_commit may copy on write, clearing "
-	  "complete on " << *ob << dendl;
-	ob->complete = false;
+		ldout(cct, 10) << "bh_write_commit may copy on write, clearing "
+		  "complete on " << *ob << dendl;
+		ob->complete = false;
       }
     }
 
@@ -1047,40 +1048,40 @@ void ObjectCacher::bh_write_commit(int64_t poolid, sobject_t oid,
       BufferHead *bh = p->second;
 
       if (bh->start() > start+(loff_t)length)
-	break;
+		break;
 
       if (bh->start() < start &&
-	  bh->end() > start+(loff_t)length) {
-	ldout(cct, 20) << "bh_write_commit skipping " << *bh << dendl;
-	continue;
+	 	 bh->end() > start+(loff_t)length) {
+			ldout(cct, 20) << "bh_write_commit skipping " << *bh << dendl;
+			continue;
       }
 
       // make sure bh is tx
       if (!bh->is_tx()) {
-	ldout(cct, 10) << "bh_write_commit skipping non-tx " << *bh << dendl;
-	continue;
+		ldout(cct, 10) << "bh_write_commit skipping non-tx " << *bh << dendl;
+		continue;
       }
 
       // make sure bh tid matches
       if (bh->last_write_tid != tid) {
-	assert(bh->last_write_tid > tid);
-	ldout(cct, 10) << "bh_write_commit newer tid on " << *bh << dendl;
-	continue;
+		assert(bh->last_write_tid > tid);
+		ldout(cct, 10) << "bh_write_commit newer tid on " << *bh << dendl;
+		continue;
       }
 
       if (r >= 0) {
-	// ok!  mark bh clean and error-free
-	mark_clean(bh);
-	bh->set_journal_tid(0);
-	if (bh->get_nocache())
-	  bh_lru_rest.lru_bottouch(bh);
-	hit.push_back(bh);
-	ldout(cct, 10) << "bh_write_commit clean " << *bh << dendl;
+		// ok!  mark bh clean and error-free
+		mark_clean(bh);
+		bh->set_journal_tid(0);
+		if (bh->get_nocache())
+		  bh_lru_rest.lru_bottouch(bh);
+		hit.push_back(bh);
+		ldout(cct, 10) << "bh_write_commit clean " << *bh << dendl;
       } else {
-	mark_dirty(bh);
-	ldout(cct, 10) << "bh_write_commit marking dirty again due to error "
-		       << *bh << " r = " << r << " " << cpp_strerror(-r)
-		       << dendl;
+		mark_dirty(bh);
+		ldout(cct, 10) << "bh_write_commit marking dirty again due to error "
+			       << *bh << " r = " << r << " " << cpp_strerror(-r)
+			       << dendl;
       }
     }
 
@@ -1112,7 +1113,7 @@ void ObjectCacher::bh_write_commit(int64_t poolid, sobject_t oid,
       oset->dirty_or_tx == 0) {        // nothing dirty/tx
     flush_set_callback(flush_set_callback_arg, oset);
   }
-
+  // 唤醒同步fsync的信号
   if (!ls.empty())
     finish_contexts(cct, ls, r);
 }
@@ -1732,6 +1733,7 @@ void ObjectCacher::flusher_entry()
 		   << max_dirty << " max)"
 		   << dendl;
     loff_t actual = get_stat_dirty() + get_stat_dirty_waiting();
+	//按照水位刷新
     if (actual > 0 && (uint64_t) actual > target_dirty) {
       // flush some dirty pages
       ldout(cct, 10) << "flusher " << get_stat_dirty() << " dirty + "
@@ -1941,7 +1943,9 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
   // Buffer heads in dirty_or_tx_bh are sorted in ObjectSet/Object/offset
   // order. But items in oset->objects are not sorted. So the iterator can
   // point to any buffer head in the ObjectSet
+  // oset是文件相关的对象集合
   BufferHead key(*oset->objects.begin());
+  // dirty_or_tx_bh是脏数据
   it = dirty_or_tx_bh.lower_bound(&key);
   p = q = it;
 
@@ -1958,17 +1962,17 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
       break;
     waitfor_commit.insert(bh->ob);
     if (bh->is_dirty()) {
-      if (scattered_write) {
-	if (last_ob != bh->ob) {
-	  if (!blist.empty()) {
-	    bh_write_scattered(blist);
-	    blist.clear();
-	  }
-	  last_ob = bh->ob;
-	}
-	blist.push_back(bh);
+      if (scattered_write) {  //默认是true
+		if (last_ob != bh->ob) {
+		  if (!blist.empty()) {
+		    bh_write_scattered(blist); //刷，是否走到？
+		    blist.clear();
+		  }
+		  last_ob = bh->ob;
+		}
+		blist.push_back(bh);
       } else {
-	bh_write(bh);
+		bh_write(bh);
       }
     }
   }
@@ -1981,40 +1985,42 @@ bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
 	backwards = false;
       BufferHead *bh = *p;
       if (bh->ob->oset != oset)
-	break;
+		break;
       waitfor_commit.insert(bh->ob);
       if (bh->is_dirty()) {
-	if (scattered_write) {
-	  if (last_ob != bh->ob) {
-	    if (!blist.empty()) {
-	      bh_write_scattered(blist);
-	      blist.clear();
-	    }
-	    last_ob = bh->ob;
-	  }
-	  blist.push_front(bh);
-	} else {
-	  bh_write(bh);
-	}
+		if (scattered_write) {
+		  if (last_ob != bh->ob) {
+		    if (!blist.empty()) {
+		      bh_write_scattered(blist);//刷，是否走到？
+		      blist.clear();
+		    }
+		    last_ob = bh->ob;
+		  }
+		  blist.push_front(bh);
+		} else {
+		  bh_write(bh);
+		}
       }
       if (!backwards)
-	break;
+		break;
     }
   }
 
   if (scattered_write && !blist.empty())
-    bh_write_scattered(blist);
+    bh_write_scattered(blist);//刷，是否走到？
 
+ //waitfor_commit 为什么包含了非脏数据？
   for (set<Object*>::iterator i = waitfor_commit.begin();
        i != waitfor_commit.end(); ++i) {
     Object *ob = *i;
 
     // we'll need to gather...
+    // ob is the object
     ldout(cct, 10) << "flush_set " << oset << " will wait for ack tid "
 		   << ob->last_write_tid << " on " << *ob << dendl;
     ob->waitfor_commit[ob->last_write_tid].push_back(gather.new_sub());
   }
-
+  // gather
   return _flush_set_finish(&gather, onfinish);
 }
 
