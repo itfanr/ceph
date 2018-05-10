@@ -39,6 +39,9 @@ void Finisher::wait_for_empty()
   finisher_lock.Unlock();
 }
 
+// finisher的主调函数
+// C_OSD_OnOpCommit
+// C_OSD_RepOpApplied
 void *Finisher::finisher_thread_entry()
 {
   finisher_lock.Lock();

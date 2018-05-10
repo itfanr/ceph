@@ -974,6 +974,7 @@ void FileJournal::queue_write_fin(uint64_t seq, Context *fin)
 }
 */
 
+//写journal
 void FileJournal::queue_completions_thru(uint64_t seq)
 {
   assert(finisher_lock.is_locked());
@@ -994,6 +995,11 @@ void FileJournal::queue_completions_thru(uint64_t seq)
     if (logger) {
       logger->tinc(l_os_j_lat, lat);
     }
+	// Journal::finisher.finisher_queue
+	/*
+	在journal的finisher处理函数里，会将op按序放到OpSequencer的队列里，
+	并且会放到FileStore::op_wq的队列中，FileStore::OpWQ线程池调用FileStore::_do_op
+	*/
     if (next.finish)
       finisher->queue(next.finish);
     if (next.tracked_op)
@@ -1254,16 +1260,23 @@ void FileJournal::flush()
   dout(10) << "flush done" << dendl;
 }
 
-//itfanr
-//真正写journal的线程
+// 写journal的线程的主调函数
 /*
-这个写操作的线程就是要把数据写入到文件当中，
-完成后调取completions中对应的成员进行回调，
-然后调到C_JournaledAhead->finish（），
-再进入FileStore::_journaled_ahead()中，
-这个函数分为了两个部分，一部分是将data操作提交到op_wq队列，
-另外一个就是对于journal操作完成的回调处理。
+ 这个写操作的线程就是要把数据写入到文件当中，
+ 完成后调取completions中对应的成员进行回调，
+ 然后调到C_JournaledAhead->finish（），
+ 再进入FileStore::_journaled_ahead()中，
+ 这个函数分为了两个部分，一部分是将data操作提交到op_wq队列，
+ 另外一个就是对于journal操作完成的回调处理。
 
+ 对于封装的写请求的事务（每个op都有一个seq序号，递增的），
+ 按照顺序会先放到completions，再放到writeq里后（writeq队尾），
+ 通知write_thread去处理，在write_thread中使用aio异步将事务写到journal里，
+ 并将I/O信息放到aio_queue，然后使用write_finish_cond通知write_finish_thread进行处理，
+ 在write_finish_thread里对于已经完成的I/O，
+ 会根据完成的op的seq序号按序放到journal的finisher队列里（因为aio并不保证顺序，
+ 因此采用op的seq序号来保证完成后处理的顺序），
+ 如果某个op之前的op还未完成，那么这个op会等到它之前的op都完成后才一起放到finisher队列里。
 */
 void FileJournal::write_thread_entry()
 {

@@ -1363,6 +1363,8 @@ struct MustPrependHashInfo : public ObjectModDesc::Visitor {
   bool must_prepend_hash_info() const { return state == FOUND_APPEND; }
 };
 
+// 该函数用于最终调用网络接口，把更新请求发送给从OSD，
+// 并调用queue_transactions 函数对该PG的主OSD上的实现更改
 void ECBackend::submit_transaction(
   const hobject_t &hoid,
   const eversion_t &at_version,
@@ -1437,7 +1439,7 @@ void ECBackend::submit_transaction(
   }
 
   dout(10) << __func__ << ": op " << *op << " starting" << dendl;
-  start_write(op);
+  start_write(op);// start_rmw, read modify write
   writing.push_back(op);
   dout(10) << "onreadable_sync: " << op->on_local_applied_sync << dendl;
 }

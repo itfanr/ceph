@@ -1846,7 +1846,7 @@ void FileStore::queue_op(OpSequencer *osr, Op *o)
 	  << " " << o->bytes << " bytes"
 	  << "   (queue has " << throttle_ops.get_current() << " ops and " << throttle_bytes.get_current() << " bytes)"
 	  << dendl;
-  op_wq.queue(osr);
+  op_wq.queue(osr); // 后续被线程池读取并处理
 }
 
 void FileStore::op_queue_reserve_throttle(Op *o)
@@ -1894,8 +1894,7 @@ void FileStore::_do_op(OpSequencer *osr, ThreadPool::TPHandle &handle)
 
 }
 
-//itfanr
-//被OpWQ::_process_finish()调用
+// 被OpWQ::_process_finish()调用
 void FileStore::_finish_op(OpSequencer *osr)
 {
   list<Context*> to_queue;
@@ -1940,6 +1939,12 @@ struct C_JournaledAhead : public Context {
   }
 };
 
+/*
+写请求到达filestore后（入口是queue_transactions），
+会生成OpSequencer（如果这个pg之前已经生成过了，就直接获取，每个pg有一个osr，
+类型为ObjectStore::Sequencer，osr->p就是指向OpSequencer），
+OpSequencer就是用来保证pg内op操作的顺序的。
+*/
 int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
 				  TrackedOpRef osd_op,
 				  ThreadPool::TPHandle *handle)
@@ -1977,12 +1982,12 @@ int FileStore::queue_transactions(Sequencer *posr, vector<Transaction>& tls,
     (*i).set_osr(osr);
   }
 
-/*
+ /*
   在进行存储数据的时候 肯定是需要记录journal的，
   也就是当数据进行写入的时候需要写到journal中一份，
   当data数据失败的时候可以从journal中进行恢复。
   所以这里为了安全起见，一般都会采用journal的方式进行保存数据。
-*/
+ */
   if (journal && journal->is_writeable() && !m_filestore_journal_trailing) {
     Op *o = build_op(tls, onreadable, onreadable_sync, osd_op);
 
@@ -2115,7 +2120,8 @@ void FileStore::_journaled_ahead(OpSequencer *osr, Op *o, Context *ondisk)
   // getting blocked behind an ondisk completion.
   if (ondisk) {
     dout(10) << " queueing ondisk " << ondisk << dendl;
-	//将日志保存完成的回调ondisk交给ondisk_finisher，后续有finisher线程处理，这里的ondisk注册回调为C_OSD_OnOpApplied。
+	//将日志保存完成的回调ondisk交给ondisk_finisher，后续有finisher线程处理，
+	//这里的ondisk注册回调为C_OSD_OnOpApplied。
     ondisk_finishers[osr->id % m_ondisk_finisher_num]->queue(ondisk);
   }
   if (!to_queue.empty()) {

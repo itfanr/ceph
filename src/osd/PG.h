@@ -914,6 +914,11 @@ public:
   bool all_unfound_are_queried_or_lost(const OSDMapRef osdmap) const;
   virtual void dump_recovery_info(Formatter *f) const = 0;
 
+/*
+  min_last_complete_ondisk 用来记录 该PG的所有 osd中最小提交的版本号，
+  也就是小于该版本的rollback对象都可以删除了。因为所有osd都已经完成请求。
+  在函数calc_min_last_complete_ondisk里计算更新。
+  */
   bool calc_min_last_complete_ondisk() {
     eversion_t min = last_complete_ondisk;
     assert(!actingbackfill.empty());

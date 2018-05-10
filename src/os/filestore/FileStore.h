@@ -196,6 +196,13 @@ private:
     uint64_t ops, bytes;
     TrackedOpRef osd_op;
   };
+  
+  /*
+  FileStore里先通过op的seq来控制持久化写到journal的顺序性，
+  然后再通过OpSequencer来保证写数据到文件系统的顺序性，
+  并且整个处理过程中都是通过FIFO来确保出入队列的顺序。
+  由此可见，同一个对象的2次写请求按照顺序进入到FileStore里进行处理，也是按照先后顺序处理完成的
+  */
   class OpSequencer : public Sequencer_impl {
     Mutex qlock; // to protect q, for benefit of flush (peek/dequeue also protected by lock)
     list<Op*> q;
@@ -372,9 +379,11 @@ private:
       return osr;
     }
     void _process(OpSequencer *osr, ThreadPool::TPHandle &handle) override {
+      // filestore层的写事务处理主函数
       store->_do_op(osr, handle);
     }
     void _process_finish(OpSequencer *osr) {
+      // 数据落盘完成后的会调用该函数
       store->_finish_op(osr);
     }
     void _clear() {

@@ -566,7 +566,6 @@ void ReplicatedBackend::submit_transaction(
   assert(t->get_temp_cleared().size() <= 1);
 
   assert(!in_progress_ops.count(tid));
-  //itfanr
   /*
   开始准备一个处理操作的结构InProgressOp，
   然后将申请的on_all_commit、on_all_applied等回调操作进行统计。
@@ -659,9 +658,9 @@ void ReplicatedBackend::op_applied(
     op->on_applied->complete(0);
     op->on_applied = 0;
   }
-  //这里开始检查是不是所有的waiting_for_applied、
+ // 这里开始检查是不是所有的waiting_for_applied、
  // waiting_for_commit队列中都已经处理完成则done成功，
-  //那时就可以删除in_progress_ops队列的ops了。
+ // 那时就可以删除in_progress_ops队列的ops了。
   if (op->done()) {
     assert(!op->on_commit && !op->on_applied);
     in_progress_ops.erase(op->tid);

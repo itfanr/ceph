@@ -8641,9 +8641,15 @@ void OSD::enqueue_op(PG *pg, OpRequestRef& op)
   pg->queue_op(op);
 }
 
-//itfanr
 //调用到OSD::dequeue_op()、pg->do_request()、
 //ReplicatedPG::do_request()、ReplicatedPG::do_op()
+/*
+从消息队列里取消息进行处理时，osd端处理op是划分为多个shard，
+然后每个shard里可以配置多个线程，pg按照取模的方式映射到不同的shard里。
+另外osd在处理pg时，从消息队列里取出的时候就对pg加了写锁的，
+而且是在请求下发到store后端才释放的锁，所以消息队列里过来的消息有序后，
+在osd端pg这一层处理时也是有序的。
+*/
 void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb ) {
 
   uint32_t shard_index = thread_index % num_shards;

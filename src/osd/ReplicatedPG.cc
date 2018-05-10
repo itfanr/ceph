@@ -1453,7 +1453,6 @@ void ReplicatedPG::get_src_oloc(const object_t& oid, const object_locator_t& olo
     src_oloc.key = oid.name;
 }
 
-//itfanr
 //关键处理函数
 void ReplicatedPG::do_request(
   OpRequestRef& op,
@@ -1509,6 +1508,10 @@ void ReplicatedPG::do_request(
       osd->reply_op_error(op, -EOPNOTSUPP);
       return;
     }
+	// 比如：处理客户端刷缓存的写逻辑
+	// do_op之前已经给pg加锁
+	// osd在处理pg时，从消息队列里取出的时候就对pg加了写锁的，
+	// 而且是在请求下发到store后端才释放的锁
     do_op(op); // do it now
     break;
 
@@ -1597,8 +1600,7 @@ bool ReplicatedPG::check_src_targ(const hobject_t& soid, const hobject_t& toid) 
  * pg lock will be held (if multithreaded)
  * osd_lock NOT held.
  */
- //itfanr
-//关键处理函数
+// 关键处理函数
 void ReplicatedPG::do_op(OpRequestRef& op)
 {
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
@@ -2084,9 +2086,8 @@ void ReplicatedPG::do_op(OpRequestRef& op)
       }
     }
   }
-
-  //itfanr
-  //创建一个OpContext结构，该结构会接管message中的所有ops的操作
+  
+  // 创建一个OpContext结构，该结构会接管message中的所有ops的操作
   OpContext *ctx = new OpContext(op, m->get_reqid(), m->ops, obc, this);
 
   if (!obc->obs.exists)
@@ -2161,7 +2162,7 @@ void ReplicatedPG::do_op(OpRequestRef& op)
   op->mark_started();
   ctx->src_obc.swap(src_obc);
 
-  execute_ctx(ctx);
+  execute_ctx(ctx); // 执行
   utime_t prepare_latency = ceph_clock_now(cct);
   prepare_latency -= op->get_dequeued_time();
   osd->logger->tinc(l_osd_op_prepare_lat, prepare_latency);
@@ -2902,10 +2903,9 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   map<hobject_t,ObjectContextRef, hobject_t::BitwiseComparator>& src_obc = ctx->src_obc;
 
   // this method must be idempotent since we may call it several times
-  // before we finally apply the resulting transaction.
-  //itfanr
-  //get_transaction的实现由ReplicatedBackend::get_transaction() 完成
-  //申请一个叫做RPGTransaction 然后交给了ctx->op_t
+  // before we finally apply the resulting transaction. 
+  // get_transaction的实现由ReplicatedBackend::get_transaction() 完成
+  // 申请一个叫做RPGTransaction 然后交给了ctx->op_t
   ctx->op_t.reset(pgbackend->get_transaction());
 
   if (op->may_write() || op->may_cache()) {
@@ -2948,6 +2948,8 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   dout(30) << __func__ << " user_at_version " << ctx->user_at_version << dendl;
 
   if (op->may_read()) {
+  	// 对某个对象进行写时会在对象上进行加锁操作ondisk_write_lock()，
+  	// 对某个对象的读请求会在先在对象上进行加锁操作ondisk_read_lock()。
     dout(10) << " taking ondisk_read_lock" << dendl;
     obc->ondisk_read_lock();
   }
@@ -2964,11 +2966,11 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
         reqid.name._num, reqid.tid, reqid.inc);
   }
 
-//将 ops上要写入的数据全部都按着结构保存在transaction的data_bl，op_bl中。
-//拿着这个transaction 就已经获得了全部的操作和数据，
-//这也就是将ops与Transaction绑定的结果。
-//因为primary osd不仅仅是要自己保存数据，其他的replica osd也要保存数据的副本，
-//这里有primary osd将准备好的数据发送给replica osd。
+// 将 ops上要写入的数据全部都按着结构保存在transaction的data_bl，op_bl中。
+// 拿着这个transaction 就已经获得了全部的操作和数据，
+// 这也就是将ops与Transaction绑定的结果。
+// 因为primary osd不仅仅是要自己保存数据，其他的replica osd也要保存数据的副本，
+// 这里有primary osd将准备好的数据发送给replica osd。
   int result = prepare_transaction(ctx);
 
   {
@@ -2998,7 +3000,7 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
     close_op_ctx(ctx);
     return;
   }
-
+  // 写操作
   bool successful_write = !ctx->op_t->empty() && op->may_write() && result >= 0;
   // prepare the reply
   ctx->reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0,
@@ -3024,14 +3026,14 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
     if (result == 0)
       do_osd_op_effects(ctx, m->get_connection());
 
-	//检查是否有pending状态的读请求？
-	//如果有，则加入异步读线程的队列，继续读
-	//如果没有，则完成读请求
+	// 检查是否有pending状态的读请求？
+	// 如果有，则加入异步读线程的队列，继续读
+	// 如果没有，则完成读请求
     if (ctx->pending_async_reads.empty()) {
       complete_read_ctx(result, ctx);
     } else {
       in_progress_async_reads.push_back(make_pair(op, ctx));
-      ctx->start_async_reads(this); //处理写请求
+      ctx->start_async_reads(this); //处理读请求
     }
 
     return;
@@ -3129,7 +3131,6 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   // issue replica writes
   ceph_tid_t rep_tid = osd->get_tid();
 
-//itfanr
 //申请repop，这个repop是用来管理发送给其他副本以及自己进行数据处理的统计
 //根据这个结构可知哪些osd都完成了数据的读写操作，回调必不可少的。
   RepGather *repop = new_repop(ctx, obc, rep_tid);
@@ -3142,8 +3143,8 @@ issue_repop()将操作率先发给其他副本，这里其实就是与其他副�
 pgbackend对象已经被ReplicatedBackend进行了继承，
 所以最终使用的是ReplicatedBackend::submit_transaction()。
 */
+//写操作
   issue_repop(repop, ctx);
-//itfanr
 //如果数据处理完成了，使用eval_repop()进行收尾的工作，
 //将结果回调给客户端。
   eval_repop(repop);
@@ -6895,7 +6896,7 @@ void ReplicatedPG::apply_ctx_stats(OpContext *ctx, bool scrub_ok)
   }
 }
 
-//最终回复客户端读请求
+// 最终回复客户端读请求
 void ReplicatedPG::complete_read_ctx(int result, OpContext *ctx)
 {
   MOSDOp *m = static_cast<MOSDOp*>(ctx->op->get_req());
@@ -8519,7 +8520,7 @@ void ReplicatedPG::issue_repop(RepGather *repop, OpContext *ctx)
       pinfo.last_update = ctx->at_version;
     }
   }
-
+  // 获取写锁
   ctx->obc->ondisk_write_lock();
   if (ctx->clone_obc)
     ctx->clone_obc->ondisk_write_lock();
@@ -8548,7 +8549,14 @@ void ReplicatedPG::issue_repop(RepGather *repop, OpContext *ctx)
     ctx->obc,
     ctx->clone_obc,
     unlock_snapset_obc ? ctx->snapset_obc : ObjectContextRef());
-  pgbackend->submit_transaction(
+  
+  // 将事务发送到OSD处理，对于不同的PG实现，调用不同的类，
+  // PGBackend有两个子类，ReplicatedBackend 和 ECBackend 两个类对应不同的实现
+  // 写请求要等数据写到底层文件系统（文件系统缓存里）才释放锁，
+  // 这样后续对这个对象的读可以直接从文件系统缓存里读到（或者数据刷到盘上后从磁盘上读取）
+  
+  //在写操作过程中，函数issue_repop会带上 min_last_complete_ondisk信息用于删除 rollback对象。
+    pgbackend->submit_transaction(
     soid,
     ctx->at_version,
     std::move(ctx->op_t),

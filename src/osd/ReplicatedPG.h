@@ -331,8 +331,13 @@ public:
   void queue_transaction(ObjectStore::Transaction&& t, OpRequestRef op) {
     osd->store->queue_transaction(osr.get(), std::move(t), 0, 0, 0, op);
   }
-  //itfanr
-  //关键函数
+ 
+  // 关键函数
+  // 调用的queue_transactions函数，会调用到os层
+  /*
+	在OSD的处理线程中就会给PG加锁，一直到queue_transactions里把事务放到journal的队列里
+	（以filestore为例）才释放PG的锁
+  */
   void queue_transactions(vector<ObjectStore::Transaction>& tls, OpRequestRef op) {
     osd->store->queue_transactions(osr.get(), tls, 0, 0, 0, op, NULL);
   }
