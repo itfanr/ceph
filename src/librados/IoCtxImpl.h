@@ -28,6 +28,16 @@
 
 class RadosClient;
 
+/*
+该类是pool的上下文信息，一个pool对应一个IoctxImpl对象。
+librados中所有关于IO操作的API都设计在librados::IoCtx中，接口的真正实现在IoCtxImpl中。
+它的处理过程如下： 
+1）把请求封装成ObjectOperation 类（osdc 中的） 
+2）把相关的pool信息添加到里面，封装成Objecter::Op对像 
+3）调用相应的函数 objecter- >op_submit 发送给相应的OSD 
+4）操作完成后，调用相应的回调函数。
+
+*/
 struct librados::IoCtxImpl {
   atomic_t ref_cnt;
   RadosClient *client;

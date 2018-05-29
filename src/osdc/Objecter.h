@@ -59,7 +59,12 @@ class MWatchNotify;
 class PerfCounters;
 
 // -----------------------------------------
+/*
+OSDC
+该模块是客户端模块比较底层的，模块，用于封装操作数据，计算对象的地址、发送请求和处理超时。
 
+ObjectOperation 封装操作
+*/
 struct ObjectOperation {
   vector<OSDOp> ops;
   int flags;
@@ -1235,7 +1240,8 @@ public:
     void dump(Formatter *f) const;
   };
 
-  struct Op : public RefCountedObject {
+//该结构体封装了完成一个操作的相关上下文信息，包括target地址信息、连接信息等。
+ struct Op : public RefCountedObject {
     OSDSession *session;
     int incarnation;
 

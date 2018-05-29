@@ -3053,7 +3053,7 @@ void Objecter::_send_op(Op *op, MOSDOp *m)
     assert(op->tid > 0);
     m = _prepare_osd_op(op);
   }
-
+  // tid: op->tid
   ldout(cct, 15) << "_send_op " << op->tid << " to osd." << op->session->osd
 		 << dendl;
 

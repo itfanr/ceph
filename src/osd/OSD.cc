@@ -8468,6 +8468,7 @@ struct send_map_on_destruct {
 
 void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
 {
+ //op上带有MOSDOp消息
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
   assert(m->get_type() == CEPH_MSG_OSD_OP);
   if (op_is_discardable(m)) {
@@ -8501,6 +8502,7 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
   }
 
   // calc actual pgid
+  // 从MOSDOp消息中获取对应的pg
   pg_t _pgid = m->get_pg();
   int64_t pool = _pgid.pool();
 
@@ -8508,7 +8510,7 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
       osdmap->have_pg_pool(pool))
     _pgid = osdmap->raw_pg_to_pg(_pgid);
 
-  spg_t pgid;
+  spg_t pgid;//spg_t是带有shard_id的
   if (!osdmap->get_primary_shard(_pgid, &pgid)) {
     // missing pool or acting set empty -- drop
     return;
@@ -8518,7 +8520,7 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
   if (pg) {
     op->send_map_update = share_map.should_send;
     op->sent_epoch = m->get_map_epoch();
-  	//itfanr
+  	
   	//找到PG以后，这时将这个op交给PG进行继续处理。
   	//已经从OSD处理的message转化为了PG处理的op。
   	//最终添加到OSDService->op_wq队列
@@ -8638,6 +8640,8 @@ void OSD::enqueue_op(PG *pg, OpRequestRef& op)
 	   << " cost " << op->get_req()->get_cost()
 	   << " latency " << latency
 	   << " " << *(op->get_req()) << dendl;
+  // osd 处理每个op
+  // 加入到pg的队列中
   pg->queue_op(op);
 }
 

@@ -1389,6 +1389,8 @@ int ReplicatedPG::do_scrub_ls(MOSDOp *m, OSDOp *osd_op)
   return r;
 }
 
+// peer_last_complete_ondisk 保存了各个osd在该pg上的最后成功完成操作的版本，
+// 函数update_peer_last_complete_ondisk在每次sub_op_modify_reply完成后调用，用于更新该值 
 void ReplicatedPG::calc_trim_to()
 {
   size_t target = cct->_conf->osd_min_pg_log_entries;

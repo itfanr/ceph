@@ -1929,18 +1929,32 @@ void PG::queue_op(OpRequestRef& op)
     op->mark_delayed("waiting_for_map not empty");
     return;
   }
+  /*
+	函数op_must_wait_for_map，判断当前的epch 大于 op 的epoch, 
+	则必须加入waiting_for_map等待，
+	这里的osdmap的epoch的判断，是一个PG层的epoch的判断。
+	当op的epoch大于 pg的epoch，需要等待更新pg当前的epoch
+
+	ceph使用版本控制的方式来标记一个PG内的每一次更新，
+	每个版本包括一个(epoch，version)来组成：其中epoch是osdmap的版本，
+	每当有OSD状态变化如增加删除等时，epoch就递增；version是PG内每次更新操作的版本号，
+	递增的，由PG内的Primary OSD进行分配的。
+  */
   if (op_must_wait_for_map(get_osdmap_with_maplock()->get_epoch(), op)) {
     waiting_for_map.push_back(op);
     op->mark_delayed("op must wait for map");
     return;
   }
   op->mark_queued_for_pg();
-  //itfanr
+
+  //将op和pg绑定，插入osd的op_wq队列
   //实际调用的是OSD::ShardedOpWQ::_enqueue()
+  //其实也是是osd->op_shardedwq  
   osd->op_wq.queue(make_pair(PGRef(this), op));
   {
     // after queue() to include any locking costs
 #ifdef WITH_LTTNG
+    //op的唯一标识
     osd_reqid_t reqid = op->get_reqid();
 #endif
     tracepoint(pg, queue_op, reqid.name._type,

@@ -433,6 +433,10 @@ namespace std {
   };
 } // namespace std
 
+//spg_t比pg_t多了shard_id
+// 也就是osd在osd 列表中的序号，这个对于replicatePG无意义，一般设置为NO_SHARD，
+//对于ErasureCodePG，各个chunk的序号比较重要，关系到数据的恢复。
+//get_primary_shard获取EC的primay osd 的shard id
 struct spg_t {
   pg_t pgid;
   shard_id_t shard;
@@ -3054,7 +3058,7 @@ ostream& operator<<(ostream& out, const osd_peer_stat_t &stat);
 
 
 // -----------------------------------------
-
+//ObjectExtent保存的是对象内的分片信息
 class ObjectExtent {
   /**
    * ObjectExtents are used for specifying IO behavior against RADOS
@@ -4071,6 +4075,7 @@ WRITE_CLASS_ENCODER(ScrubMap::object)
 WRITE_CLASS_ENCODER(ScrubMap)
 
 //读写OSD的op操作
+//类OSDop封装对象的一个操作。结构ceph_osd_op  封装一个操作码和相关的输入输出参数
 struct OSDOp {
   ceph_osd_op op;
   sobject_t soid;

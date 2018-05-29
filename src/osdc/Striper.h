@@ -22,6 +22,7 @@ class CephContext;
 
 //namespace ceph {
 
+//当一个文件到对象的映射时，对象有分片，则使用这个类来分片，并保存分片信息。  
   class Striper {
   public:
     /*
