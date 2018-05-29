@@ -44,7 +44,7 @@ class Finisher;
 
 
 /**** Filer interface ***/
-
+//Filer是把file的range映射成object
 class Filer {
   CephContext *cct;
   Objecter   *objecter;
@@ -186,7 +186,7 @@ class Filer {
 		  Context *onack,
 		  Context *oncommit,
 		  int op_flags = 0) {
-    vector<ObjectExtent> extents; //定义在osd_types.h里面
+    vector<ObjectExtent> extents; //定义在osd_types.h里面 extents表示什么？
     Striper::file_to_extents(cct, ino, layout, offset, len, truncate_size,
 			     extents);
     objecter->sg_write_trunc(extents, snapc, bl, mtime, flags,

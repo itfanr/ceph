@@ -2427,7 +2427,13 @@ void Client::handle_osd_map(MOSDMap *m)
 // ------------------------
 // incoming messages
 
+/*
+client::init() -------->   messenger->add_dispatcher_tail(objecter)  
+-------->   ms_can_fast_dispatch_any() 判 断     
+-------->    将 objecter 分 配 器 添 加 到
+fast_dispatchers 中
 
+*/
 bool Client::ms_dispatch(Message *m)
 {
   Mutex::Locker l(client_lock);
@@ -8379,6 +8385,7 @@ int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, in
     }
 }
 
+//buf表示要写的data
 int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
                   const struct iovec *iov, int iovcnt)
 {

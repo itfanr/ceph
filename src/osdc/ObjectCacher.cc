@@ -627,6 +627,8 @@ void ObjectCacher::perf_stop()
 }
 
 /* private */
+//尝试在缓存中获取指定 oid 的 object，如果没
+//有就创建 
 ObjectCacher::Object *ObjectCacher::get_object(sobject_t oid,
 					       uint64_t object_no,
 					       ObjectSet *oset,
@@ -1147,7 +1149,11 @@ void ObjectCacher::flush(loff_t amount)
   }    
 }
 
-
+/*
+读写操作触发的缓存维护是 OC 的缓存管理中最重要的部分，它主要体
+现在读写操作过程中改变 bh 的状态、在 bh 有增减时通过 lru 移动位置、在
+读写操作结束时主动调用 trim 函数释放超过数量限制的 bh 和 object
+*/
 void ObjectCacher::trim()
 {
   assert(lock.is_locked());
@@ -1217,6 +1223,7 @@ bool ObjectCacher::is_cached(ObjectSet *oset, vector<ObjectExtent>& extents,
  *           must delete it)
  * returns 0 if doing async read
  */
+ //读操作的总处理函数，内部包含各回调等待机制 
 int ObjectCacher::readx(OSDRead *rd, ObjectSet *oset, Context *onfinish)
 {
   return _readx(rd, oset, onfinish, true);
@@ -1316,6 +1323,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
 
     // map extent into bufferheads
     map<loff_t, BufferHead*> hits, missing, rx, errors;
+	//通过map_read调用，得到四种临时容器，分别对应bh的几种状态
     o->map_read(*ex_it, hits, missing, rx, errors);
     if (external_call) {
       // retry reading error buffers
@@ -1543,6 +1551,7 @@ void ObjectCacher::retry_waiting_reads()
   waitfor_read.splice(waitfor_read.end(), ls);
 }
 
+//写操作的总处理函数，内部包含各回调等待机制 
 int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
 {
   assert(lock.is_locked());
@@ -1715,6 +1724,9 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
   return ret;
 }
 
+//在 OC 启动之后就进入循环等待状态，不断地
+//向后端刷数据
+//定时刷新objectcache缓存
 void ObjectCacher::flusher_entry()
 {
   ldout(cct, 10) << "flusher start" << dendl;
@@ -1920,6 +1932,8 @@ bool ObjectCacher::_flush_set_finish(C_GatherBuilder *gather,
 
 // flush.  non-blocking, takes callback.
 // returns true if already flushed
+//OC 在管理缓存的过程有三条主干，分别是外部库的直接调用、读写操作触
+//发、定期刷新
 bool ObjectCacher::flush_set(ObjectSet *oset, Context *onfinish)
 {
   assert(lock.is_locked());

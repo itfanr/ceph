@@ -93,11 +93,12 @@ class ObjectCacher {
   }
 
 
-
   // ******* BufferHead *********
+  //是参与 objectcacher缓存管理的最小数据单元
   class BufferHead : public LRUObject {
   public:
     // states
+    //每个 bufferhead从被创建到被释放会有七种状态
     static const int STATE_MISSING = 0;
     static const int STATE_CLEAN = 1;
     static const int STATE_ZERO = 2;   // NOTE: these are *clean* zeros
@@ -112,20 +113,21 @@ class ObjectCacher {
     int ref;
     struct {
       loff_t start, length;   // bh extent in object
-    } ex;
+    } ex;  //在所属 object 上的偏移和长度 
     bool dontneed; //indicate bh don't need by anyone
     bool nocache; //indicate bh don't need by this caller
 
   public:
-    Object *ob;
-    bufferlist  bl;
+    Object *ob; //指向本 bh 所属的 object 类 
+    bufferlist  bl; //实际数据
     ceph_tid_t last_write_tid;  // version of bh (if non-zero)
     ceph_tid_t last_read_tid;   // tid of last read op (if any)
     ceph::real_time last_write;
     SnapContext snapc;
     ceph_tid_t journal_tid;
     int error; // holds return value for failed reads
-
+	//由读取偏移和回调函数组成的 map 容器，用
+	//于实现异步处理所有的读请求 
     map<loff_t, list<Context*> > waitfor_read;
 
     // cons
@@ -174,6 +176,8 @@ class ObjectCacher {
     bool is_error() { return state == STATE_ERROR; }
 
     // reference counting
+    //引用计数增减函数，配合 lruobject 的相关函
+	//数界定缓存老化 
     int get() {
       assert(ref >= 0);
       if (ref == 0) lru_pin();
@@ -222,17 +226,23 @@ class ObjectCacher {
   };
 
   // ******* Object *********
+  /*
+  在 object 类中，既保存了 objectset 指针（相当于文件 inode），又保存了 OC
+  的指针，前者用于外部 client 接口调用以文件为单位进行缓存管理，包括 flush、
+  release 等操作，而后者则用于 OC 的全局管理，如对已经失效或超出用量限
+  制的缓存的释放等
+  */  
   class Object : public LRUObject {
   private:
     // ObjectCacher::Object fields
     int ref;
-    ObjectCacher *oc;
-    sobject_t oid;
+    ObjectCacher *oc; //外部 OC 类的指针，标明本 object 与 OC 类的从属关系 
+    sobject_t oid;    //本 object 所属的对象 oid 号 
     friend struct ObjectSet;
 
   public:
     uint64_t object_no;
-    ObjectSet *oset;
+    ObjectSet *oset;//外部文件属性指针，标明本 object 与文件的从属关系 
     xlist<Object*>::item set_item;
     object_locator_t oloc;
     uint64_t truncate_size, truncate_seq;
@@ -241,13 +251,16 @@ class ObjectCacher {
     bool exists;
 
   public:
-    map<loff_t, BufferHead*>     data;
+  	//该容器包含了本 object 目前在缓存中的所有
+	//数据片段（bh）和偏移对应关系 
+    map<loff_t, BufferHead*>   data;
 
     ceph_tid_t last_write_tid;  // version of bh (if non-zero)
     ceph_tid_t last_commit_tid; // last update commited.
 
     int dirty_or_tx;
-
+	//由写操作 tid 号和回调函数组成的 map 容器，
+	//用于在完成写操作提交之后执行对应操作 
     map< ceph_tid_t, list<Context*> > waitfor_commit;
     xlist<C_ReadFinish*> reads;
 
@@ -308,6 +321,12 @@ class ObjectCacher {
      * @param offset object byte offset
      * @return iterator pointing to buffer, or data.end()
      */
+     /*
+	针对data 容 器 的 内 部 搜 索 函 数，基于
+	lower_bound 函数封装而成，返回一个 data
+	容器的迭代器，该函数在 OC 的管理中多次被
+	用到。
+	*/
     map<loff_t,BufferHead*>::iterator data_lower_bound(loff_t offset) {
       map<loff_t,BufferHead*>::iterator p = data.lower_bound(offset);
       if (p != data.begin() &&
@@ -343,6 +362,9 @@ class ObjectCacher {
 
     bool is_cached(loff_t off, loff_t len);
     bool include_all_cached_data(loff_t off, loff_t len);
+	//may_write和may_read是重要函数
+	//在读写操作的初期完成条带化之后的文件数
+	//据片段到本 object 上的映射 
     int map_read(ObjectExtent &ex,
                  map<loff_t, BufferHead*>& hits,
                  map<loff_t, BufferHead*>& missing,
@@ -368,15 +390,15 @@ class ObjectCacher {
     }
   };
 
-
+//以文件为单位将所有缓存到的 object 归类
   struct ObjectSet {
     void *parent;
 
-    inodeno_t ino;
+    inodeno_t ino;//文件的inode
     uint64_t truncate_seq, truncate_size;
 
     int64_t poolid;
-    xlist<Object*> objects;
+    xlist<Object*> objects;//缓存的所有对象的指针
 
     int dirty_or_tx;
     bool return_enoent;
@@ -388,10 +410,12 @@ class ObjectCacher {
 
   };
 
-
   // ******* ObjectCacher *********
   // ObjectCacher fields
  private:
+//WritebackHandler 类 的 实 例 ， 实 际 是 由
+//ObjecterWriteback 完成功能，负责真正向后
+//端发起读写请求 
   WritebackHandler& writeback_handler;
   bool scattered_write;
 
@@ -406,6 +430,9 @@ class ObjectCacher {
   void *flush_set_callback_arg;
 
   // indexed by pool_id
+//一个 vector 类型的容器，内部元素是由对象
+//oid 和 object 指针组成的 map 容器，而每个
+//map的索引则是对象所在的存储池编号
   vector<ceph::unordered_map<sobject_t, Object*> > objects;
 
   list<Context*> waitfor_read;
@@ -413,6 +440,9 @@ class ObjectCacher {
   ceph_tid_t last_read_tid;
 
   set<BufferHead*, BufferHead::ptr_lt> dirty_or_tx_bh;
+//三个 lru 链表，其中，bh_lru_dirty 用于保存
+//拥有脏数据的 bh，bh_lru_rest 用于保存 clean
+//状态下的 bh，ob_lru 用于保存缓存到的所有object 
   LRU   bh_lru_dirty, bh_lru_rest;
   LRU   ob_lru;
 
@@ -428,7 +458,7 @@ class ObjectCacher {
       return 0;
     }
   } flusher_thread;
-
+  //回调完成器类，是读写操作的回调入口 
   Finisher finisher;
 
   // objects
@@ -467,7 +497,8 @@ class ObjectCacher {
   loff_t get_stat_dirty_waiting() { return stat_dirty_waiting; }
   loff_t get_stat_clean() { return stat_clean; }
   loff_t get_stat_zero() { return stat_zero; }
-
+  
+//更改目标 bh 或 ob 在 lru 链表中的位置，直接影响缓存老化的判断 
   void touch_bh(BufferHead *bh) {
     if (bh->is_dirty())
       bh_lru_dirty.lru_touch(bh);
@@ -513,7 +544,7 @@ class ObjectCacher {
     bh_lru_dirty.lru_touch(bh);
     //bh->set_dirty_stamp(ceph_clock_now(g_ceph_context));
   }
-
+  //在本 object 的 data 容器中增减 bh 
   void bh_add(Object *ob, BufferHead *bh);
   void bh_remove(Object *ob, BufferHead *bh);
 
@@ -550,6 +581,7 @@ class ObjectCacher {
   void retry_waiting_reads();
 
  public:
+ //完成读写请求的回调处理，并设置全局中断和 bh 状态
   void bh_read_finish(int64_t poolid, sobject_t oid, ceph_tid_t tid,
 		      loff_t offset, uint64_t length,
 		      bufferlist &bl, int r,
@@ -747,7 +779,7 @@ public:
 			     oset->truncate_size, extents);
     return is_cached(oset, extents, snapid);
   }
-
+//将用户请求的偏移和数据长度映射到文件条带上，然后再调用对应的操作函数 
   int file_read(ObjectSet *oset, file_layout_t *layout, snapid_t snapid,
 		loff_t offset, uint64_t len, bufferlist *bl, int flags,
 		Context *onfinish) {

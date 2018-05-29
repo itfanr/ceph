@@ -1121,6 +1121,8 @@ struct ObjectOperation {
 // ----------------
 
 //RadosClient下面的Objecter调度者
+//Objecter主要是将request封装成对应的Ops、
+//计算出request需要发送的OSD并且以message的方式将Op发送出去
 class Objecter : public md_config_obs_t, public Dispatcher {
 public:
   // config observer bits
@@ -2848,7 +2850,7 @@ public:
   void sg_read_trunc(vector<ObjectExtent>& extents, snapid_t snap,
 		     bufferlist *bl, int flags, uint64_t trunc_size,
 		     __u32 trunc_seq, Context *onfinish, int op_flags = 0) {
-    if (extents.size() == 1) {
+    if (extents.size() == 1) { //啥意思？
       read_trunc(extents[0].oid, extents[0].oloc, extents[0].offset,
 		 extents[0].length, snap, bl, flags, extents[0].truncate_size,
 		 trunc_seq, onfinish, 0, 0, op_flags);

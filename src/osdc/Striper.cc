@@ -77,11 +77,9 @@ void Striper::file_to_extents(
   while (left > 0) {
 
   /*
-	 cur就是读写IO的 offset，su就是4M大小。  cur/su，得到的bockno即为对象的序号，
-
-     stripe_count为1, stripes_per_object 为 1。 最后算出objectno，即为最终的序号。
-
-     最后通过字符串拼接，把block_name_prefix + objectno=  oid
+	cur就是读写IO的 offset，su就是4M大小。  cur/su，得到的bockno即为对象的序号，
+	stripe_count为1, stripes_per_object 为 1。 最后算出objectno，即为最终的序号。
+	最后通过字符串拼接，把block_name_prefix + objectno = oid
   */
   
     // layout into objects

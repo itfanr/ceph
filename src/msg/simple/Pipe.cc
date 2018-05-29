@@ -1499,6 +1499,7 @@ void Pipe::stop_and_wait()
 /* read msgs from socket.
  * also, server.
  */
+ //读消息
 void Pipe::reader()
 {
   pipe_lock.Lock();

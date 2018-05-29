@@ -926,6 +926,7 @@ void Objecter::_do_watch_notify(LingerOp *info, MWatchNotify *m)
   m->put();
 }
 
+//Objecter负责数据分发
 bool Objecter::ms_dispatch(Message *m)
 {
   ldout(cct, 10) << __func__ << " " << cct << " " << *m << dendl;
