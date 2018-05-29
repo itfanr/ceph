@@ -2255,6 +2255,7 @@ void Objecter::_send_op_account(Op *op)
   }
 }
 
+//client发送消息给osd的入口函数
 void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
 {
   // rwlock is locked
@@ -2339,7 +2340,7 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   _session_op_assign(s, op);
 
   if (need_send) {
-    _send_op(op, m); //发送这个op给OSD
+    _send_op(op, m); //发送op给OSD
   }
 
   // Last chance to touch Op here, after giving up session lock it can

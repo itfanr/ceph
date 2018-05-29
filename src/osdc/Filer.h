@@ -146,8 +146,10 @@ class Filer {
 		 int op_flags = 0) {
     assert(snap);  // (until there is a non-NOSNAP write)
     vector<ObjectExtent> extents;
+	// 将要读取数据的长度和偏移转化为要访问的对象,extents沿用了brtfs文件系统的概念 
     Striper::file_to_extents(cct, ino, layout, offset, len, truncate_size,
 			     extents);
+	//向osd发起请求
     objecter->sg_read_trunc(extents, snap, bl, flags,
 			    truncate_size, truncate_seq, onfinish, op_flags);
     return 0;
@@ -184,7 +186,7 @@ class Filer {
 		  Context *onack,
 		  Context *oncommit,
 		  int op_flags = 0) {
-    vector<ObjectExtent> extents;
+    vector<ObjectExtent> extents; //定义在osd_types.h里面
     Striper::file_to_extents(cct, ino, layout, offset, len, truncate_size,
 			     extents);
     objecter->sg_write_trunc(extents, snapc, bl, mtime, flags,

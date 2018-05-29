@@ -163,7 +163,9 @@ struct object_locator_t {
   int64_t pool;     ///< pool id
   string key;       ///< key string (if non-empty)
   string nspace;    ///< namespace
-  int64_t hash;     ///< hash position (if >= 0)
+  int64_t hash;     ///< hash position (if >= 0) 
+  // objectname计算得到的hash值/带字母(16进？)
+  
 
   explicit object_locator_t()
     : pool(-1), hash(-1) {}
@@ -4074,13 +4076,18 @@ struct ScrubMap {
 WRITE_CLASS_ENCODER(ScrubMap::object)
 WRITE_CLASS_ENCODER(ScrubMap)
 
-//读写OSD的op操作
-//类OSDop封装对象的一个操作。结构ceph_osd_op  封装一个操作码和相关的输入输出参数
+// 读写OSD的op操作
+// 类OSDop封装对象的一个操作。结构ceph_osd_op  封装一个操作码和相关的输入输出参数
 struct OSDOp {
-  ceph_osd_op op;
-  sobject_t soid;
+  ceph_osd_op op; // 具体操作数据的封装
+  
+  sobject_t soid; //源数据对象—非操作对象（不是object id）
 
-  bufferlist indata, outdata;
+  bufferlist indata, outdata; 
+  // 操作的输入数据—包括1.那个客户端，如objectgw，2. 方法，如bucket_init_index，
+  // 3. 放置数据的bufferlist
+  // 操作的输出数据
+  
   int32_t rval;
 
   OSDOp() : rval(0) {

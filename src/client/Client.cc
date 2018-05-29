@@ -8499,6 +8499,7 @@ int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
   }
 
   if (cct->_conf->client_oc && (have & CEPH_CAP_FILE_BUFFER)) {
+  	//开启oc，异步写
     // do buffered write
     if (!in->oset.dirty_or_tx)
       get_cap_ref(in, CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_BUFFER);
@@ -8522,6 +8523,7 @@ int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
       _flush_range(in, offset, size);
     }
   } else {
+   //同步写
     if (f->flags & O_DIRECT)
       _flush_range(in, offset, size);
 

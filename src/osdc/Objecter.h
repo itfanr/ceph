@@ -1120,7 +1120,7 @@ struct ObjectOperation {
 
 // ----------------
 
-
+//RadosClient下面的Objecter调度者
 class Objecter : public md_config_obs_t, public Dispatcher {
 public:
   // config observer bits
@@ -2551,6 +2551,7 @@ public:
     op_submit(o, &tid);
     return tid;
   }
+  //客户端写操作最终调用这个函数
   ceph_tid_t write_trunc(const object_t& oid, const object_locator_t& oloc,
 			 uint64_t off, uint64_t len, const SnapContext& snapc,
 			 const bufferlist &bl, ceph::real_time mtime, int flags,

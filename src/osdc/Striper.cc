@@ -39,6 +39,7 @@ void Striper::file_to_extents(CephContext *cct, const char *object_format,
   assimilate_extents(object_extents, extents);
 }
 
+//最终调用这个线程entry
 void Striper::file_to_extents(
   CephContext *cct, const char *object_format,
   const file_layout_t *layout,

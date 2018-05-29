@@ -48,7 +48,8 @@ private:
   int32_t retry_attempt;   // 0 is first attempt.  -1 if we don't know.
 
   object_t oid;
-  object_locator_t oloc;
+  object_locator_t oloc; // 存储定位器，用于找到object在osd中的位置
+  
   pg_t pgid;
   bufferlist::iterator p;
   // Decoding flags. Decoding is only needed for messages catched by pipe reader.
@@ -58,7 +59,8 @@ private:
   atomic<bool> final_decode_needed;
   //
 public:
-  vector<OSDOp> ops;
+  vector<OSDOp> ops; //针对这个object的多个操作的集合
+
 private:
 
   snapid_t snapid;
