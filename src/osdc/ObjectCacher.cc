@@ -1223,7 +1223,8 @@ bool ObjectCacher::is_cached(ObjectSet *oset, vector<ObjectExtent>& extents,
  *           must delete it)
  * returns 0 if doing async read
  */
- //读操作的总处理函数，内部包含各回调等待机制 
+ //读操作的总处理函数，内部包含各回调等待机制
+ //前面是file_read函数
 int ObjectCacher::readx(OSDRead *rd, ObjectSet *oset, Context *onfinish)
 {
   return _readx(rd, oset, onfinish, true);
@@ -1248,7 +1249,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
    * zeroed buffers needs to feed single extents into readx().
    */
   assert(!oset->return_enoent || rd->extents.size() == 1);
-
+//基于条带化信息
   for (vector<ObjectExtent>::iterator ex_it = rd->extents.begin();
        ex_it != rd->extents.end();
        ++ex_it) {
@@ -1264,6 +1265,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
       touch_ob(o);
 
     // does not exist and no hits?
+    //缓存中没有
     if (oset->return_enoent && !o->exists) {
       ldout(cct, 10) << "readx  object !exists, 1 extent..." << dendl;
 
@@ -1322,6 +1324,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
     }
 
     // map extent into bufferheads
+    //没有命中缓存，则创建
     map<loff_t, BufferHead*> hits, missing, rx, errors;
 	//通过map_read调用，得到四种临时容器，分别对应bh的几种状态
     o->map_read(*ex_it, hits, missing, rx, errors);
@@ -1335,6 +1338,9 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
       hits.insert(errors.begin(), errors.end());
     }
 
+	//missing和rx容器是否为空
+	//说明目标bh还未完全填充数据，所以missing容器检查，
+	//发起bh_read，并构建递归回调，rx容器与之类似
     if (!missing.empty() || !rx.empty()) {
       // read missing
       map<loff_t, BufferHead*>::iterator last = missing.end();
@@ -1396,6 +1402,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
 	touch_bh(bh_it->second);
 
     } else {
+	//说明目标bh已经填充好了数据，可以将数据导出了
       assert(!hits.empty());
 
       // make a plain list
@@ -1448,6 +1455,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
 	  bufferlist bit;
 	  // put substr here first, since substr_of clobbers, and we
 	  // may get multiple bh's at this stripe_map position
+	  //构建循环将数据导出放到stripe_map临时容器中
 	  if (bh->is_zero()) {
 	    stripe_map[f_it->first].append_zero(len);
 	  } else {
@@ -1494,7 +1502,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
 		     << dendl;
       delete rd;
     }
-    return 0;  // wait!
+    return 0;  // wait!  返回0给read函数
   }
   if (perfcounter && external_call) {
     perfcounter->inc(l_objectcacher_data_read, total_bytes_read);
@@ -1506,6 +1514,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
   ldout(cct, 10) << "readx has all buffers" << dendl;
 
   // ok, assemble into result buffer.
+  //读出数据填充用户内存空间并返回
   uint64_t pos = 0;
   if (rd->bl && !error) {
     rd->bl->clear();
@@ -1561,6 +1570,7 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
   bool dontneed = wr->fadvise_flags & LIBRADOS_OP_FLAG_FADVISE_DONTNEED;
   bool nocache = wr->fadvise_flags & LIBRADOS_OP_FLAG_FADVISE_NOCACHE;
 
+  //基于条带化信息构建循环
   for (vector<ObjectExtent>::iterator ex_it = wr->extents.begin();
        ex_it != wr->extents.end();
        ++ex_it) {
@@ -1570,6 +1580,7 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
 			   ex_it->truncate_size, oset->truncate_seq);
 
     // map it all into a single bufferhead.
+    //调用map_write函数将本次循环的条带信息映射到单一的bh上
     BufferHead *bh = o->map_write(*ex_it, wr->journal_tid);
     bool missing = bh->is_missing();
     bh->snapc = wr->snapc;
@@ -1585,6 +1596,7 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
     //  - the buffer frags need not be (and almost certainly aren't)
     // note: i assume striping is monotonic... no jumps backwards, ever!
     loff_t opos = ex_it->offset;
+	//根据file_to_extents函数得到的buffer_extents构建循环
     for (vector<pair<uint64_t, uint64_t> >::iterator f_it
 	   = ex_it->buffer_extents.begin();
 	 f_it != ex_it->buffer_extents.end();
@@ -1596,6 +1608,8 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
       assert(f_it->second <= bh->length() - bhoff);
 
       // get the frag we're mapping in
+      //将打入写操作结构体wr中的数据提取出来附到bh相对于偏移量左
+	  //边不需要更新的部分数据后面
       bufferlist frag;
       frag.substr_of(wr->bl,
 		     f_it->first, f_it->second);
@@ -1611,6 +1625,7 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
     }
 
     // ok, now bh is dirty.
+    //标记本bh为dirty状态，调整lru中的位置，并将整合之后的bh合并到object的bh集合中
     mark_dirty(bh);
     if (dontneed)
       bh->set_dontneed(true);
@@ -1631,7 +1646,7 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace)
 		       bytes_written_in_flush);
     }
   }
-
+	//调用_wait_for_write函数进入等待数据往后端的状态
   int r = _wait_for_write(wr, bytes_written, oset, onfreespace);
   delete wr;
 
