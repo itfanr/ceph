@@ -42,6 +42,10 @@ The API call looks like::
 
     ceph-volume lvm prepare --filestore --data volume_group/lv_name --journal journal
 
+For enabling :ref:`encryption <ceph-volume-lvm-encryption>`, the ``--dmcrypt`` flag is required::
+
+    ceph-volume lvm prepare --filestore --dmcrypt --data volume_group/lv_name --journal journal
+
 There is flexibility to use a raw device or partition as well for ``--data``
 that will be converted to a logical volume. This is not ideal in all situations
 since ``ceph-volume`` is just going to create a unique volume group and
@@ -158,9 +162,8 @@ any data** in the OSD)::
 
 The command line tool will not contact the monitor to generate an OSD ID and
 will format the LVM device in addition to storing the metadata on it so that it
-can later be startednot contact the monitor to generate an OSD ID and will
-format the LVM device in addition to storing the metadata on it so that it can
-later be started (for detailed metadata description see :ref:`ceph-volume-lvm-tags`).
+can be started later (for detailed metadata description see
+:ref:`ceph-volume-lvm-tags`).
 
 
 .. _ceph-volume-lvm-prepare_bluestore:
@@ -189,6 +192,9 @@ A raw device can be specified in the same way::
 
     ceph-volume lvm prepare --bluestore --data /path/to/device
 
+For enabling :ref:`encryption <ceph-volume-lvm-encryption>`, the ``--dmcrypt`` flag is required::
+
+    ceph-volume lvm prepare --bluestore --dmcrypt --data vg/lv
 
 If a ``block.db`` or a ``block.wal`` is needed (they are optional for
 bluestore) they can be specified with ``--block.db`` and ``--block.wal``

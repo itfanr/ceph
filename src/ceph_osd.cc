@@ -100,16 +100,18 @@ static void usage()
   generic_server_usage();
 }
 
-#ifdef BUILDING_FOR_EMBEDDED
-void cephd_preload_embedded_plugins();
-void cephd_preload_rados_classes(OSD *osd);
-extern "C" int cephd_osd(int argc, const char **argv)
-#else
 int main(int argc, const char **argv)
-#endif
 {
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
+  if (args.empty()) {
+    cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    exit(1);
+  }
+  if (ceph_argparse_need_usage(args)) {
+    usage();
+    exit(0);
+  }
 
   map<string,string> defaults = {
     // We want to enable leveldb's log, while allowing users to override this
@@ -146,8 +148,6 @@ int main(int argc, const char **argv)
   for (std::vector<const char*>::iterator i = args.begin(); i != args.end(); ) {
     if (ceph_argparse_double_dash(args, i)) {
       break;
-    } else if (ceph_argparse_flag(args, i, "-h", "--help", (char*)NULL)) {
-      usage();
     } else if (ceph_argparse_flag(args, i, "--mkfs", (char*)NULL)) {
       mkfs = true;
     } else if (ceph_argparse_flag(args, i, "--mkjournal", (char*)NULL)) {
@@ -199,6 +199,7 @@ int main(int argc, const char **argv)
       }
       return 0;
     }
+    setsid();
     global_init_postfork_start(g_ceph_context);
   }
   common_init_finish(g_ceph_context);
@@ -228,7 +229,7 @@ int main(int argc, const char **argv)
 
     if (bl.read_file(dump_pg_log.c_str(), &error) >= 0) {
       pg_log_entry_t e;
-      bufferlist::iterator p = bl.begin();
+      auto p = bl.cbegin();
       while (!p.end()) {
 	uint64_t pos = p.get_off();
 	try {
@@ -290,9 +291,6 @@ int main(int argc, const char **argv)
     forker.exit(-ENODEV);
   }
 
-#ifdef BUILDING_FOR_EMBEDDED
-  cephd_preload_embedded_plugins();
-#endif
 
   if (mkkey) {
     common_init_finish(g_ceph_context);
@@ -628,11 +626,9 @@ flushjournal_out:
     return -1;
   global_init_chdir(g_ceph_context);
 
-#ifndef BUILDING_FOR_EMBEDDED
   if (global_init_preload_erasure_code(g_ceph_context) < 0) {
     forker.exit(1);
   }
-#endif
 
   osd = new OSD(g_ceph_context,
                 store,
@@ -678,10 +674,6 @@ flushjournal_out:
     forker.daemonize();
   }
 
-
-#ifdef BUILDING_FOR_EMBEDDED
-  cephd_preload_rados_classes(osd);
-#endif
 
   register_async_signal_handler_oneshot(SIGINT, handle_osd_signal);
   register_async_signal_handler_oneshot(SIGTERM, handle_osd_signal);

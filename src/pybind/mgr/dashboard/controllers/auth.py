@@ -2,16 +2,16 @@
 from __future__ import absolute_import
 
 import time
-import sys
 
 import bcrypt
 import cherrypy
 
-from ..tools import ApiController, RESTController, Session
+from . import ApiController, RESTController
 from .. import logger, mgr
+from ..tools import Session
 
 
-@ApiController('auth')
+@ApiController('/auth')
 class Auth(RESTController):
     """
     Provide login and logout actions.
@@ -26,7 +26,6 @@ class Auth(RESTController):
       |                           | seconds without activity                  |
     """
 
-    @RESTController.args_from_json
     def create(self, username, password, stay_signed_in=False):
         now = time.time()
         config_username = mgr.get_config('username', None)
@@ -58,9 +57,9 @@ class Auth(RESTController):
     def password_hash(password, salt_password=None):
         if not salt_password:
             salt_password = bcrypt.gensalt()
-        if sys.version_info > (3, 0):
-            return bcrypt.hashpw(password, salt_password)
-        return bcrypt.hashpw(password.encode('utf8'), salt_password)
+        else:
+            salt_password = salt_password.encode('utf8')
+        return bcrypt.hashpw(password.encode('utf8'), salt_password).decode('utf8')
 
     @staticmethod
     def check_auth():

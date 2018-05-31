@@ -94,6 +94,8 @@ OPTION(xio_max_send_inline, OPT_INT) // xio maximum threshold to send inline
 OPTION(compressor_zlib_isal, OPT_BOOL)
 OPTION(compressor_zlib_level, OPT_INT) //regular zlib compression level, not applicable to isa-l optimized version
 
+OPTION(qat_compressor_enabled, OPT_BOOL)
+
 OPTION(plugin_crypto_accelerator, OPT_STR)
 
 OPTION(mempool_debug, OPT_BOOL)
@@ -385,7 +387,6 @@ OPTION(objecter_completion_locks_per_session, OPT_U64) // num of completion lock
 OPTION(objecter_inject_no_watch_ping, OPT_BOOL)   // suppress watch pings
 OPTION(objecter_retry_writes_after_first_reply, OPT_BOOL)   // ignore the first reply for each write, and resend the osd op instead
 OPTION(objecter_debug_inject_relock_delay, OPT_BOOL)
-OPTION(objecter_mclock_service_tracker, OPT_BOOL)
 
 // Max number of deletes at once in a single Filer::purge call
 OPTION(filer_max_purge_ops, OPT_U32)
@@ -607,9 +608,6 @@ OPTION(osd_max_markdown_count, OPT_INT)
 
 OPTION(osd_op_pq_max_tokens_per_priority, OPT_U64)
 OPTION(osd_op_pq_min_cost, OPT_U64)
-OPTION(osd_disk_threads, OPT_INT)
-OPTION(osd_disk_thread_ioprio_class, OPT_STR) // rt realtime be best effort idle
-OPTION(osd_disk_thread_ioprio_priority, OPT_INT) // 0-7
 OPTION(osd_recover_clone_overlap, OPT_BOOL)   // preserve clone_overlap during recovery/migration
 OPTION(osd_op_num_threads_per_shard, OPT_INT)
 OPTION(osd_op_num_threads_per_shard_hdd, OPT_INT)
@@ -668,8 +666,6 @@ OPTION(osd_backfill_scan_min, OPT_INT)
 OPTION(osd_backfill_scan_max, OPT_INT)
 OPTION(osd_op_thread_timeout, OPT_INT)
 OPTION(osd_op_thread_suicide_timeout, OPT_INT)
-OPTION(osd_recovery_thread_timeout, OPT_INT)
-OPTION(osd_recovery_thread_suicide_timeout, OPT_INT)
 OPTION(osd_recovery_sleep, OPT_FLOAT)         // seconds to sleep between recovery ops
 OPTION(osd_recovery_sleep_hdd, OPT_FLOAT)
 OPTION(osd_recovery_sleep_ssd, OPT_FLOAT)
@@ -699,8 +695,7 @@ OPTION(osd_max_trimming_pgs, OPT_U64)
 OPTION(osd_heartbeat_min_healthy_ratio, OPT_FLOAT)
 
 OPTION(osd_mon_heartbeat_interval, OPT_INT)  // (seconds) how often to ping monitor if no peers
-OPTION(osd_mon_report_interval_max, OPT_INT)
-OPTION(osd_mon_report_interval_min, OPT_INT)  // pg stats, failures, up_thru, boot.
+OPTION(osd_mon_report_interval, OPT_INT)  // failures, up_thru, boot.
 OPTION(osd_mon_report_max_in_flight, OPT_INT)  // max updates in flight
 OPTION(osd_beacon_report_interval, OPT_INT)       // (second) how often to send beacon message to monitor
 OPTION(osd_pg_stat_report_interval_max, OPT_INT)  // report pg stats for any given pg at least this often
@@ -778,7 +773,7 @@ OPTION(osd_debug_drop_ping_duration, OPT_INT)
 OPTION(osd_debug_op_order, OPT_BOOL)
 OPTION(osd_debug_verify_missing_on_start, OPT_BOOL)
 OPTION(osd_debug_scrub_chance_rewrite_digest, OPT_U64)
-OPTION(osd_debug_verify_snaps_on_info, OPT_BOOL)
+OPTION(osd_debug_verify_snaps, OPT_BOOL)
 OPTION(osd_debug_verify_stray_on_activate, OPT_BOOL)
 OPTION(osd_debug_skip_full_check_in_backfill_reservation, OPT_BOOL)
 OPTION(osd_debug_reject_backfill_probability, OPT_DOUBLE)
@@ -1189,6 +1184,16 @@ OPTION(filestore_queue_max_delay_multiple, OPT_DOUBLE)
 /// Filestore high delay multiple.  Defaults to 0 (disabled)
 OPTION(filestore_queue_high_delay_multiple, OPT_DOUBLE)
 
+/// Filestore max delay multiple bytes.  Defaults to 0 (disabled)
+OPTION(filestore_queue_max_delay_multiple_bytes, OPT_DOUBLE)
+/// Filestore high delay multiple bytes.  Defaults to 0 (disabled)
+OPTION(filestore_queue_high_delay_multiple_bytes, OPT_DOUBLE)
+
+/// Filestore max delay multiple ops.  Defaults to 0 (disabled)
+OPTION(filestore_queue_max_delay_multiple_ops, OPT_DOUBLE)
+/// Filestore high delay multiple ops.  Defaults to 0 (disabled)
+OPTION(filestore_queue_high_delay_multiple_ops, OPT_DOUBLE)
+
 /// Use above to inject delays intended to keep the op queue between low and high
 OPTION(filestore_queue_low_threshhold, OPT_DOUBLE)
 OPTION(filestore_queue_high_threshhold, OPT_DOUBLE)
@@ -1294,6 +1299,7 @@ OPTION(rgw_lc_max_objs, OPT_INT)
 OPTION(rgw_lc_debug_interval, OPT_INT)  // Debug run interval, in seconds
 OPTION(rgw_script_uri, OPT_STR) // alternative value for SCRIPT_URI if not set in request
 OPTION(rgw_request_uri, OPT_STR) // alternative value for REQUEST_URI if not set in request
+OPTION(rgw_ignore_get_invalid_range, OPT_BOOL) // treat invalid (e.g., negative) range requests as full
 OPTION(rgw_swift_url, OPT_STR)             // the swift url, being published by the internal swift auth
 OPTION(rgw_swift_url_prefix, OPT_STR) // entry point for which a url is considered a swift url
 OPTION(rgw_swift_auth_url, OPT_STR)        // default URL to go and verify tokens for v1 auth (if not using internal swift auth)
@@ -1433,7 +1439,6 @@ OPTION(rgw_data_log_window, OPT_INT) // data log entries window (in seconds)
 OPTION(rgw_data_log_changes_size, OPT_INT) // number of in-memory entries to hold for data changes log
 OPTION(rgw_data_log_num_shards, OPT_INT) // number of objects to keep data changes log on
 OPTION(rgw_data_log_obj_prefix, OPT_STR) //
-OPTION(rgw_replica_log_obj_prefix, OPT_STR) //
 
 OPTION(rgw_bucket_quota_ttl, OPT_INT) // time for cached bucket stats to be cached within rgw instance
 OPTION(rgw_bucket_quota_soft_threshold, OPT_DOUBLE) // threshold from which we don't rely on cached info for quota decisions

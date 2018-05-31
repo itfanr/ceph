@@ -78,8 +78,10 @@
 #include "messages/MOSDPGRemove.h"
 #include "messages/MOSDPGInfo.h"
 #include "messages/MOSDPGCreate.h"
+#include "messages/MOSDPGCreate2.h"
 #include "messages/MOSDPGTrim.h"
 #include "messages/MOSDScrub.h"
+#include "messages/MOSDScrub2.h"
 #include "messages/MOSDScrubReserve.h"
 #include "messages/MOSDRepScrub.h"
 #include "messages/MOSDRepScrubMap.h"
@@ -131,6 +133,7 @@
 #include "messages/MMDSFindInoReply.h"
 #include "messages/MMDSOpenIno.h"
 #include "messages/MMDSOpenInoReply.h"
+#include "messages/MMDSSnapUpdate.h"
 
 #include "messages/MDirUpdate.h"
 #include "messages/MDiscover.h"
@@ -170,6 +173,7 @@
 #include "messages/MMgrDigest.h"
 #include "messages/MMgrReport.h"
 #include "messages/MMgrOpen.h"
+#include "messages/MMgrClose.h"
 #include "messages/MMgrConfigure.h"
 #include "messages/MMonMgrReport.h"
 #include "messages/MServiceMap.h"
@@ -178,6 +182,7 @@
 
 #include "messages/MWatchNotify.h"
 #include "messages/MTimeCheck.h"
+#include "messages/MTimeCheck2.h"
 
 #include "common/config.h"
 
@@ -513,12 +518,18 @@ Message *decode_message(CephContext *cct, int crcflags,
   case MSG_OSD_PG_CREATE:
     m = new MOSDPGCreate;
     break;
+  case MSG_OSD_PG_CREATE2:
+    m = new MOSDPGCreate2;
+    break;
   case MSG_OSD_PG_TRIM:
     m = new MOSDPGTrim;
     break;
 
   case MSG_OSD_SCRUB:
     m = new MOSDScrub;
+    break;
+  case MSG_OSD_SCRUB2:
+    m = new MOSDScrub2;
     break;
   case MSG_OSD_SCRUB_RESERVE:
     m = new MOSDScrubReserve;
@@ -673,6 +684,10 @@ Message *decode_message(CephContext *cct, int crcflags,
     m = new MMDSOpenInoReply;
     break;
 
+  case MSG_MDS_SNAPUPDATE:
+    m = new MMDSSnapUpdate();
+    break;
+
   case MSG_MDS_FRAGMENTNOTIFY:
     m = new MMDSFragmentNotify;
     break;
@@ -780,6 +795,10 @@ Message *decode_message(CephContext *cct, int crcflags,
     m = new MMgrOpen();
     break;
 
+  case MSG_MGR_CLOSE:
+    m = new MMgrClose();
+    break;
+
   case MSG_MGR_REPORT:
     m = new MMgrReport();
     break;
@@ -790,6 +809,9 @@ Message *decode_message(CephContext *cct, int crcflags,
 
   case MSG_TIMECHECK:
     m = new MTimeCheck();
+    break;
+  case MSG_TIMECHECK2:
+    m = new MTimeCheck2();
     break;
 
   case MSG_MON_HEALTH:
@@ -880,7 +902,7 @@ void Message::encode_trace(bufferlist &bl, uint64_t features) const
   encode(*p, bl);
 }
 
-void Message::decode_trace(bufferlist::iterator &p, bool create)
+void Message::decode_trace(bufferlist::const_iterator &p, bool create)
 {
   blkin_trace_info info = {};
   decode(info, p);
@@ -940,7 +962,7 @@ void encode_message(Message *msg, uint64_t features, bufferlist& payload)
 // We've slipped in a 0 signature at this point, so any signature checking after this will
 // fail.  PLR
 
-Message *decode_message(CephContext *cct, int crcflags, bufferlist::iterator& p)
+Message *decode_message(CephContext *cct, int crcflags, bufferlist::const_iterator& p)
 {
   ceph_msg_header h;
   ceph_msg_footer_old fo;

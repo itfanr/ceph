@@ -17,8 +17,6 @@
 #include "common/Formatter.h"
 #include "include/types.h"
 
-int64_t unit_to_bytesize(string val, ostream *pss);
-
 std::string bytes2str(uint64_t count);
 
 struct ceph_data_stats
@@ -52,7 +50,7 @@ struct ceph_data_stats
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator &p) {
+  void decode(bufferlist::const_iterator &p) {
     DECODE_START(1, p);
     decode(byte_total, p);
     decode(byte_used, p);
@@ -91,4 +89,15 @@ void dump_services(Formatter* f, const map<string, list<string> >& services, con
 
 string cleanbin(bufferlist &bl, bool &b64);
 string cleanbin(string &str);
+
+namespace ceph::util {
+
+// Returns true if s matches any parameters:
+template <typename ...XS>
+bool match_str(const std::string& s, const XS& ...xs)
+{
+ return ((s == xs) || ...);
+}
+
+} // namespace ceph::util
 #endif /* CEPH_UTIL_H */

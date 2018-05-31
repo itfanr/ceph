@@ -614,7 +614,8 @@ FileStore::FileStore(CephContext* cct, const std::string &base,
   plb.add_u64(l_filestore_journal_ops, "journal_ops", "Active journal entries to be applied");
   plb.add_u64(l_filestore_journal_queue_bytes, "journal_queue_bytes", "Size of journal queue");
   plb.add_u64(l_filestore_journal_bytes, "journal_bytes", "Active journal operation size to be applied");
-  plb.add_time_avg(l_filestore_journal_latency, "journal_latency", "Average journal queue completing latency");
+  plb.add_time_avg(l_filestore_journal_latency, "journal_latency", "Average journal queue completing latency",
+                   NULL, PerfCountersBuilder::PRIO_USEFUL);
   plb.add_u64_counter(l_filestore_journal_wr, "journal_wr", "Journal write IOs");
   plb.add_u64_avg(l_filestore_journal_wr_bytes, "journal_wr_bytes", "Journal data written");
   plb.add_u64(l_filestore_op_queue_max_ops, "op_queue_max_ops", "Max operations in writing to FS queue");
@@ -630,7 +631,8 @@ FileStore::FileStore(CephContext* cct, const std::string &base,
   plb.add_time_avg(l_filestore_commitcycle_interval, "commitcycle_interval", "Average interval between commits");
   plb.add_time_avg(l_filestore_commitcycle_latency, "commitcycle_latency", "Average latency of commit");
   plb.add_u64_counter(l_filestore_journal_full, "journal_full", "Journal writes while full");
-  plb.add_time_avg(l_filestore_queue_transaction_latency_avg, "queue_transaction_latency_avg", "Store operation queue latency");
+  plb.add_time_avg(l_filestore_queue_transaction_latency_avg, "queue_transaction_latency_avg",
+                   "Store operation queue latency", NULL, PerfCountersBuilder::PRIO_USEFUL);
   plb.add_time(l_filestore_sync_pause_max_lat, "sync_pause_max_latency", "Max latency of op_wq pause before syncfs");
 
   logger = plb.create_perf_counters();
@@ -708,6 +710,11 @@ void FileStore::collect_metadata(map<string,string> *pm)
     default:
       (*pm)["backend_filestore_partition_path"] = string(partition_path);
       (*pm)["backend_filestore_dev_node"] = string(dev_node);
+      if (vdo_fd >= 0) {
+	(*pm)["vdo"] = "true";
+	(*pm)["vdo_physical_size"] =
+	  stringify(4096 * get_vdo_stat(vdo_fd, "physical_blocks"));
+      }
   }
 }
 
@@ -736,8 +743,17 @@ int FileStore::statfs(struct store_statfs_t *buf0)
     assert(r != -ENOENT);
     return r;
   }
-  buf0->total = buf.f_blocks * buf.f_bsize;
-  buf0->available = buf.f_bavail * buf.f_bsize;
+
+  uint64_t bfree = buf.f_bavail * buf.f_bsize;
+  uint64_t thin_total, thin_avail;
+  if (get_vdo_utilization(vdo_fd, &thin_total, &thin_avail)) {
+    buf0->total = thin_total;
+    bfree = std::min(bfree, thin_avail);
+  } else {
+    buf0->total = buf.f_blocks * buf.f_bsize;
+  }
+  buf0->available = bfree;
+
   // Adjust for writes pending in the journal
   if (journal) {
     uint64_t estimate = journal->get_journal_size_estimate();
@@ -778,7 +794,7 @@ int FileStore::dump_journal(ostream& out)
   return r;
 }
 
-FileStoreBackend *FileStoreBackend::create(long f_type, FileStore *fs)
+FileStoreBackend *FileStoreBackend::create(unsigned long f_type, FileStore *fs)
 {
   switch (f_type) {
 #if defined(__linux__)
@@ -798,7 +814,7 @@ FileStoreBackend *FileStoreBackend::create(long f_type, FileStore *fs)
   }
 }
 
-void FileStore::create_backend(long f_type)
+void FileStore::create_backend(unsigned long f_type)
 {
   m_fs_type = f_type;
 
@@ -1224,6 +1240,20 @@ int FileStore::_detect_fs()
     return r;
   }
 
+  // vdo
+  {
+    char partition_path[PATH_MAX];
+    char dev_node[PATH_MAX];
+    int rc = get_device_by_fd(fsid_fd, partition_path, dev_node, PATH_MAX);
+    if (rc == 0) {
+      vdo_fd = get_vdo_stats_handle(dev_node, &vdo_name);
+      if (vdo_fd >= 0) {
+	dout(0) << __func__ << " VDO volume " << vdo_name << " for " << dev_node
+		<< dendl;
+      }
+    }
+  }
+
   // test xattrs
   char fn[PATH_MAX];
   int x = rand();
@@ -1338,7 +1368,7 @@ int FileStore::read_superblock()
 
   bufferlist bl;
   bl.push_back(std::move(bp));
-  bufferlist::iterator i = bl.begin();
+  auto i = bl.cbegin();
   decode(superblock, i);
   return 0;
 }
@@ -1358,7 +1388,7 @@ int FileStore::version_stamp_is_valid(uint32_t *version)
   }
   bufferlist bl;
   bl.push_back(std::move(bp));
-  bufferlist::iterator i = bl.begin();
+  auto i = bl.cbegin();
   decode(*version, i);
   dout(10) << __FUNC__ << ": was " << *version << " vs target "
 	   << target_version << dendl;
@@ -1985,6 +2015,10 @@ int FileStore::umount()
     (*it)->stop();
   }
 
+  if (vdo_fd >= 0) {
+    VOID_TEMP_FAILURE_RETRY(::close(vdo_fd));
+    vdo_fd = -1;
+  }
   if (fsid_fd >= 0) {
     VOID_TEMP_FAILURE_RETRY(::close(fsid_fd));
     fsid_fd = -1;
@@ -2460,7 +2494,7 @@ int FileStore::_check_global_replay_guard(const coll_t& cid,
   bl.append(buf, r);
 
   SequencerPosition opos;
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   decode(opos, p);
 
   VOID_TEMP_FAILURE_RETRY(::close(fd));
@@ -2632,7 +2666,7 @@ int FileStore::_check_replay_guard(int fd, const SequencerPosition& spos)
   bl.append(buf, r);
 
   SequencerPosition opos;
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   decode(opos, p);
   bool in_progress = false;
   if (!p.end())   // older journals don't have this
@@ -2897,7 +2931,7 @@ void FileStore::_do_transaction(
         uint32_t type = op->hint_type;
         bufferlist hint;
         i.decode_bl(hint);
-        bufferlist::iterator hiter = hint.begin();
+        auto hiter = hint.cbegin();
         if (type == Transaction::COLL_HINT_EXPECTED_NUM_OBJECTS) {
           uint32_t pg_num;
           uint64_t num_objs;
@@ -4860,7 +4894,11 @@ int FileStore::list_collections(vector<coll_t>& ls, bool include_temp)
       // d_type not supported (non-ext[234], btrfs), must stat
       struct stat sb;
       char filename[PATH_MAX];
-      snprintf(filename, sizeof(filename), "%s/%s", fn, de->d_name);
+      if (int n = snprintf(filename, sizeof(filename), "%s/%s", fn, de->d_name);
+	  n >= static_cast<int>(sizeof(filename))) {
+	derr << __func__ << " path length overrun: " << n << dendl;
+	assert(false);
+      }
 
       r = ::stat(filename, &sb);
       if (r < 0) {
@@ -5916,8 +5954,12 @@ int FileStore::set_throttle_params()
     cct->_conf->filestore_queue_low_threshhold,
     cct->_conf->filestore_queue_high_threshhold,
     cct->_conf->filestore_expected_throughput_bytes,
-    cct->_conf->filestore_queue_high_delay_multiple,
-    cct->_conf->filestore_queue_max_delay_multiple,
+    cct->_conf->filestore_queue_high_delay_multiple?
+    cct->_conf->filestore_queue_high_delay_multiple:
+    cct->_conf->filestore_queue_high_delay_multiple_bytes,
+    cct->_conf->filestore_queue_max_delay_multiple?
+    cct->_conf->filestore_queue_max_delay_multiple:
+    cct->_conf->filestore_queue_max_delay_multiple_bytes,
     cct->_conf->filestore_queue_max_bytes,
     &ss);
 
@@ -5925,8 +5967,12 @@ int FileStore::set_throttle_params()
     cct->_conf->filestore_queue_low_threshhold,
     cct->_conf->filestore_queue_high_threshhold,
     cct->_conf->filestore_expected_throughput_ops,
-    cct->_conf->filestore_queue_high_delay_multiple,
-    cct->_conf->filestore_queue_max_delay_multiple,
+    cct->_conf->filestore_queue_high_delay_multiple?
+    cct->_conf->filestore_queue_high_delay_multiple:
+    cct->_conf->filestore_queue_high_delay_multiple_ops,
+    cct->_conf->filestore_queue_max_delay_multiple?
+    cct->_conf->filestore_queue_max_delay_multiple:
+    cct->_conf->filestore_queue_max_delay_multiple_ops,
     cct->_conf->filestore_queue_max_ops,
     &ss);
 
@@ -6071,7 +6117,7 @@ void FSSuperblock::encode(bufferlist &bl) const
   ENCODE_FINISH(bl);
 }
 
-void FSSuperblock::decode(bufferlist::iterator &bl)
+void FSSuperblock::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START(2, bl);
   compat_features.decode(bl);

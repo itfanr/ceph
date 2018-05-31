@@ -28,7 +28,7 @@
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
 static ostream& _prefix(std::ostream *_dout, ReplicatedBackend *pgb) {
-  return *_dout << pgb->get_parent()->gen_dbg_prefix();
+  return pgb->get_parent()->gen_dbg_prefix(*_dout);
 }
 
 namespace {
@@ -100,7 +100,7 @@ static void log_subop_stats(
 
 ReplicatedBackend::ReplicatedBackend(
   PGBackend::Listener *pg,
-  coll_t coll,
+  const coll_t &coll,
   ObjectStore::CollectionHandle &c,
   ObjectStore *store,
   CephContext *cct) :
@@ -236,7 +236,8 @@ void ReplicatedBackend::on_change()
 {
   dout(10) << __func__ << dendl;
   for (auto& op : in_progress_ops) {
-    delete op.second.on_commit;
+    delete op.second->on_commit;
+    op.second->on_commit = nullptr;
   }
   in_progress_ops.clear();
   clear_recovery_state();
@@ -264,7 +265,7 @@ void ReplicatedBackend::objects_read_async(
 
 class C_OSD_OnOpCommit : public Context {
   ReplicatedBackend *pg;
-  ReplicatedBackend::InProgressOp *op;
+  ReplicatedBackend::InProgressOpRef op;
 public:
   C_OSD_OnOpCommit(ReplicatedBackend *pg, ReplicatedBackend::InProgressOp *op) 
     : pg(pg), op(op) {}
@@ -453,13 +454,13 @@ void ReplicatedBackend::submit_transaction(
   auto insert_res = in_progress_ops.insert(
     make_pair(
       tid,
-      InProgressOp(
+      new InProgressOp(
 	tid, on_all_commit,
 	orig_op, at_version)
       )
     );
   assert(insert_res.second);
-  InProgressOp &op = insert_res.first->second;
+  InProgressOp &op = *insert_res.first->second;
 
   op.waiting_for_commit.insert(
     parent->get_acting_recovery_backfill_shards().begin(),
@@ -504,8 +505,13 @@ void ReplicatedBackend::submit_transaction(
 }
 
 void ReplicatedBackend::op_commit(
-  InProgressOp *op)
+  InProgressOpRef& op)
 {
+  if (op->on_commit == nullptr) {
+    // aborted
+    return;
+  }
+
   FUNCTRACE(cct);
   OID_EVENT_TRACE_WITH_MSG((op && op->op) ? op->op->get_req() : NULL, "OP_COMMIT_BEGIN", true);
   dout(10) << __func__ << ": " << op->tid << dendl;
@@ -538,7 +544,7 @@ void ReplicatedBackend::do_repop_reply(OpRequestRef op)
 
   auto iter = in_progress_ops.find(rep_tid);
   if (iter != in_progress_ops.end()) {
-    InProgressOp &ip_op = iter->second;
+    InProgressOp &ip_op = *iter->second;
     const MOSDOp *m = NULL;
     if (ip_op.op)
       m = static_cast<const MOSDOp *>(ip_op.op->get_req());
@@ -733,9 +739,8 @@ void ReplicatedBackend::_do_push(OpRequestRef op)
 
   vector<PushReplyOp> replies;
   ObjectStore::Transaction t;
-  ostringstream ss;
-  if (get_parent()->check_failsafe_full(ss)) {
-    dout(10) << __func__ << " Out of space (failsafe) processing push request: " << ss.str() << dendl;
+  if (get_parent()->check_failsafe_full()) {
+    dout(10) << __func__ << " Out of space (failsafe) processing push request." << dendl;
     ceph_abort();
   }
   for (vector<PushOp>::const_iterator i = m->pushes.begin();
@@ -799,10 +804,8 @@ void ReplicatedBackend::_do_pull_response(OpRequestRef op)
   op->mark_started();
 
   vector<PullOp> replies(1);
-
-  ostringstream ss;
-  if (get_parent()->check_failsafe_full(ss)) {
-    dout(10) << __func__ << " Out of space (failsafe) processing pull response (push): " << ss.str() << dendl;
+  if (get_parent()->check_failsafe_full()) {
+    dout(10) << __func__ << " Out of space (failsafe) processing pull response (push)." << dendl;
     ceph_abort();
   }
 
@@ -824,7 +827,7 @@ void ReplicatedBackend::_do_pull_response(OpRequestRef op)
     t.register_on_complete(
       new PG_RecoveryQueueAsync(
 	get_parent(),
-	get_parent()->bless_gencontext(c)));
+	get_parent()->bless_unlocked_gencontext(c)));
   }
   replies.erase(replies.end() - 1);
 
@@ -1024,7 +1027,7 @@ void ReplicatedBackend::do_repop(OpRequestRef op)
   // shipped transaction and log entries
   vector<pg_log_entry_t> log;
 
-  bufferlist::iterator p = const_cast<bufferlist&>(m->get_data()).begin();
+  auto p = const_cast<bufferlist&>(m->get_data()).cbegin();
   decode(rm->opt, p);
 
   if (m->new_temp_oid != hobject_t()) {
@@ -1841,7 +1844,7 @@ int ReplicatedBackend::build_push_op(const ObjectRecoveryInfo &recovery_info,
     bufferlist bv = out_op->attrset[OI_ATTR];
     object_info_t oi;
     try {
-     bufferlist::iterator bliter = bv.begin();
+     auto bliter = bv.cbegin();
      decode(oi, bliter);
     } catch (...) {
       dout(0) << __func__ << ": bad object_info_t: " << recovery_info.soid << dendl;

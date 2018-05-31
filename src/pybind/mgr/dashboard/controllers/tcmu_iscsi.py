@@ -1,24 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
+from . import ApiController, AuthRequired, RESTController
 from .. import mgr
 from ..services.ceph_service import CephService
-from ..tools import ApiController, AuthRequired, RESTController
 
 SERVICE_TYPE = 'tcmu-runner'
 
 
-@ApiController('tcmuiscsi')
+@ApiController('/tcmuiscsi')
 @AuthRequired()
 class TcmuIscsi(RESTController):
-    def _get_rate(self, daemon_type, daemon_name, stat):
-        data = mgr.get_counter(daemon_type, daemon_name, stat)[stat]
-
-        if data and len(data) > 1:
-            return (data[-1][1] - data[-2][1]) / float(data[-1][0] - data[-2][0])
-        return 0
-
-    # pylint: disable=too-many-locals,too-many-nested-blocks
+    # pylint: disable=too-many-nested-blocks
     def list(self):  # pylint: disable=unused-argument
         daemons = {}
         images = {}
@@ -64,18 +57,32 @@ class TcmuIscsi(RESTController):
                     'tcmu-runner', service_id, perf_key)[perf_key] or
                                       [[0, 0]])[-1][1] / 1000000000
                 if lock_acquired_time > image.get('optimized_since', 0):
+                    image['optimized_daemon'] = hostname
                     image['optimized_since'] = lock_acquired_time
                     image['stats'] = {}
                     image['stats_history'] = {}
                     for s in ['rd', 'wr', 'rd_bytes', 'wr_bytes']:
                         perf_key = "{}{}".format(perf_key_prefix, s)
-                        image['stats'][s] = self._get_rate(
+                        image['stats'][s] = CephService.get_rate(
                             'tcmu-runner', service_id, perf_key)
-                        image['stats_history'][s] = mgr.get_counter(
-                            'tcmu-runner', service_id, perf_key)[perf_key]
+                        image['stats_history'][s] = CephService.get_rates(
+                            'tcmu-runner', service_id, perf_key)
             else:
                 daemon['non_optimized_paths'] += 1
                 image['non_optimized_paths'].append(hostname)
+
+        # clear up races w/ tcmu-runner clients that haven't detected
+        # loss of optimized path
+        for image in images.values():
+            optimized_daemon = image.get('optimized_daemon', None)
+            if optimized_daemon:
+                for daemon_name in image['optimized_paths']:
+                    if daemon_name != optimized_daemon:
+                        daemon = daemons[daemon_name]
+                        daemon['optimized_paths'] -= 1
+                        daemon['non_optimized_paths'] += 1
+                        image['non_optimized_paths'].append(daemon_name)
+                image['optimized_paths'] = [optimized_daemon]
 
         return {
             'daemons': sorted(daemons.values(), key=lambda d: d['server_hostname']),

@@ -7,11 +7,13 @@
 #include "common/errno.h"
 #include "common/Timer.h"
 #include "common/safe_io.h"
+#include "common/TracepointProvider.h"
 #include "include/compat.h"
 #include "include/str_list.h"
 #include "include/stringify.h"
 #include "rgw_common.h"
 #include "rgw_rados.h"
+#include "rgw_otp.h"
 #include "rgw_period_pusher.h"
 #include "rgw_realm_reloader.h"
 #include "rgw_rest.h"
@@ -24,8 +26,6 @@
 #include "rgw_rest_metadata.h"
 #include "rgw_rest_log.h"
 #include "rgw_rest_opstate.h"
-#include "rgw_replica_log.h"
-#include "rgw_rest_replica_log.h"
 #include "rgw_rest_config.h"
 #include "rgw_rest_realm.h"
 #include "rgw_swift_auth.h"
@@ -46,6 +46,12 @@
 
 #define dout_subsys ceph_subsys_rgw
 
+namespace {
+TracepointProvider::Traits rgw_op_tracepoint_traits("librgw_op_tp.so",
+                                                 "rgw_op_tracing");
+TracepointProvider::Traits rgw_rados_tracepoint_traits("librgw_rados_tp.so",
+                                                 "rgw_rados_tracing");
+}
 
 static sig_t sighandler_alrm;
 
@@ -122,15 +128,15 @@ public:
 
 static int usage()
 {
-  cerr << "usage: radosgw [options...]" << std::endl;
-  cerr << "options:\n";
-  cerr << "  --rgw-region=<region>     region in which radosgw runs\n";
-  cerr << "  --rgw-zone=<zone>         zone in which radosgw runs\n";
-  cerr << "  --rgw-socket-path=<path>  specify a unix domain socket path\n";
-  cerr << "  -m monaddress[:port]      connect to specified monitor\n";
-  cerr << "  --keyring=<path>          path to radosgw keyring\n";
-  cerr << "  --logfile=<logfile>       file to log debug output\n";
-  cerr << "  --debug-rgw=<log-level>/<memory-level>  set radosgw debug level\n";
+  cout << "usage: radosgw [options...]" << std::endl;
+  cout << "options:\n";
+  cout << "  --rgw-region=<region>     region in which radosgw runs\n";
+  cout << "  --rgw-zone=<zone>         zone in which radosgw runs\n";
+  cout << "  --rgw-socket-path=<path>  specify a unix domain socket path\n";
+  cout << "  -m monaddress[:port]      connect to specified monitor\n";
+  cout << "  --keyring=<path>          path to radosgw keyring\n";
+  cout << "  --logfile=<logfile>       file to log debug output\n";
+  cout << "  --debug-rgw=<log-level>/<memory-level>  set radosgw debug level\n";
   generic_server_usage();
 
   return 0;
@@ -155,11 +161,7 @@ static RGWRESTMgr *rest_filter(RGWRados *store, int dialect, RGWRESTMgr *orig)
 /*
  * start up the RADOS connection and then handle HTTP messages as they come in
  */
-#ifdef BUILDING_FOR_EMBEDDED
-extern "C" int cephd_rgw(int argc, const char **argv)
-#else
 int main(int argc, const char **argv)
-#endif
 {
   // dout() messages will be sent to stderr, but FCGX wants messages on stdout
   // Redirect stderr to stdout.
@@ -179,6 +181,14 @@ int main(int argc, const char **argv)
 
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
+  if (args.empty()) {
+    cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    exit(1);
+  }
+  if (ceph_argparse_need_usage(args)) {
+    usage();
+    exit(0);
+  }
 
   // First, let's determine which frontends are configured.
   int flags = CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS;
@@ -234,13 +244,6 @@ int main(int argc, const char **argv)
 			 CODE_ENVIRONMENT_DAEMON,
 			 flags, "rgw_data", false);
 
-  for (std::vector<const char*>::iterator i = args.begin(); i != args.end(); ++i) {
-    if (ceph_argparse_flag(args, i, "-h", "--help", (char*)NULL)) {
-      usage();
-      return 0;
-    }
-  }
-
   // maintain existing region root pool for new multisite objects
   if (!g_conf->rgw_region_root_pool.empty()) {
     const char *root_pool = g_conf->rgw_region_root_pool.c_str();
@@ -278,6 +281,9 @@ int main(int argc, const char **argv)
   init_async_signal_handler();
   register_async_signal_handler(SIGHUP, sighup_handler);
 
+  TracepointProvider::initialize<rgw_rados_tracepoint_traits>(g_ceph_context);
+  TracepointProvider::initialize<rgw_op_tracepoint_traits>(g_ceph_context);
+
   int r = rgw_tools_init(g_ceph_context);
   if (r < 0) {
     derr << "ERROR: unable to initialize rgw tools" << dendl;
@@ -286,14 +292,15 @@ int main(int argc, const char **argv)
 
   rgw_init_resolver();
   rgw::curl::setup_curl(fe_map);
-
+  rgw_http_client_init(g_ceph_context);
+  
 #if defined(WITH_RADOSGW_FCGI_FRONTEND)
   FCGX_Init();
 #endif
 
   RGWRados *store = RGWStoreManager::get_storage(g_ceph_context,
       g_conf->rgw_enable_gc_threads, g_conf->rgw_enable_lc_threads, g_conf->rgw_enable_quota_threads,
-      g_conf->rgw_run_sync_thread, g_conf->rgw_dynamic_resharding);
+      g_conf->rgw_run_sync_thread, g_conf->rgw_dynamic_resharding, g_conf->rgw_cache_enabled);
   if (!store) {
     mutex.Lock();
     init_timer.cancel_all_events();
@@ -318,6 +325,7 @@ int main(int argc, const char **argv)
 
   rgw_user_init(store);
   rgw_bucket_init(store->meta_mgr);
+  rgw_otp_init(store);
   rgw_log_usage_init(g_ceph_context, store);
 
   RGWREST rest;
@@ -390,7 +398,6 @@ int main(int argc, const char **argv)
     admin_resource->register_resource("metadata", new RGWRESTMgr_Metadata);
     admin_resource->register_resource("log", new RGWRESTMgr_Log);
     admin_resource->register_resource("opstate", new RGWRESTMgr_Opstate);
-    admin_resource->register_resource("replica_log", new RGWRESTMgr_ReplicaLog);
     admin_resource->register_resource("config", new RGWRESTMgr_Config);
     admin_resource->register_resource("realm", new RGWRESTMgr_Realm);
     rest.register_resource(g_conf->rgw_admin_entry, admin_resource);
@@ -455,8 +462,7 @@ int main(int argc, const char **argv)
       fe = new RGWLoadGenFrontend(env, config);
     }
 #if defined(WITH_RADOSGW_BEAST_FRONTEND)
-    else if ((framework == "beast") &&
-	cct->check_experimental_feature_enabled("rgw-beast-frontend")) {
+    else if (framework == "beast") {
       int port;
       config->get_val("port", 80, &port);
       std::string uri_prefix;
@@ -559,6 +565,7 @@ int main(int argc, const char **argv)
   rgw::auth::s3::LDAPEngine::shutdown();
   rgw_tools_cleanup();
   rgw_shutdown_resolver();
+  rgw_http_client_cleanup();
   rgw::curl::cleanup_curl();
 
   rgw_perf_stop(g_ceph_context);

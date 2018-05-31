@@ -4,18 +4,16 @@ from __future__ import absolute_import
 import collections
 import json
 
-import cherrypy
-from mgr_module import CommandResult
-
+from . import ApiController, AuthRequired, Endpoint, BaseController
 from .. import mgr
 from ..services.ceph_service import CephService
-from ..tools import ApiController, AuthRequired, BaseController, NotificationQueue
+from ..tools import NotificationQueue
 
 
 LOG_BUFFER_SIZE = 30
 
 
-@ApiController('dashboard')
+@ApiController('/dashboard')
 @AuthRequired()
 class Dashboard(BaseController):
     def __init__(self):
@@ -33,30 +31,12 @@ class Dashboard(BaseController):
             self.log_buffer.appendleft(log_struct)
 
     def load_buffer(self, buf, channel_name):
-        result = CommandResult("")
-        mgr.send_command(result, "mon", "", json.dumps({
-            "prefix": "log last",
-            "format": "json",
-            "channel": channel_name,
-            "num": LOG_BUFFER_SIZE
-        }), "")
-        r, outb, outs = result.wait()
-        if r != 0:
-            # Oh well. We won't let this stop us though.
-            self.log.error("Error fetching log history (r={0}, \"{1}\")".format(
-                r, outs))
-        else:
-            try:
-                lines = json.loads(outb)
-            except ValueError:
-                self.log.error("Error decoding log history")
-            else:
-                for l in lines:
-                    buf.appendleft(l)
+        lines = CephService.send_command('mon', 'log last', channel=channel_name,
+                                         num=LOG_BUFFER_SIZE)
+        for l in lines:
+            buf.appendleft(l)
 
-    # pylint: disable=R0914
-    @cherrypy.expose
-    @cherrypy.tools.json_out()
+    @Endpoint()
     def health(self):
         if not self._log_initialized:
             self._log_initialized = True

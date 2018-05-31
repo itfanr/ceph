@@ -88,7 +88,7 @@ int JournalTool::main(std::vector<const char*> &argv)
   // Common arg parsing
   // ==================
   if (argv.empty()) {
-    usage();
+    cerr << "missing positional argument" << std::endl;
     return -EINVAL;
   }
 
@@ -171,8 +171,7 @@ int JournalTool::main(std::vector<const char*> &argv)
     } else if (type == std::string("mdlog") && mode == std::string("event")) {
       r = main_event(argv);
     } else {
-      derr << "Bad command '" << mode << "'" << dendl;
-      usage();
+      cerr << "Bad command '" << mode << "'" << std::endl;
       return -EINVAL;
     }
 
@@ -217,12 +216,10 @@ int JournalTool::main_journal(std::vector<const char*> &argv)
         force = true;
       } else {
         std::cerr << "Unknown argument " << argv[1] << std::endl;
-        usage();
         return -EINVAL;
       }
     } else if (argv.size() > 2) {
       std::cerr << "Too many arguments!" << std::endl;
-      usage();
       return -EINVAL;
     }
     return journal_reset(force);
@@ -340,13 +337,11 @@ int JournalTool::main_event(std::vector<const char*> &argv)
   std::string command = *(arg++);
   if (command != "get" && command != "splice" && command != "recover_dentries") {
     derr << "Unknown argument '" << command << "'" << dendl;
-    usage();
     return -EINVAL;
   }
 
   if (arg == argv.end()) {
     derr << "Incomplete command line" << dendl;
-    usage();
     return -EINVAL;
   }
 
@@ -361,15 +356,14 @@ int JournalTool::main_event(std::vector<const char*> &argv)
   // Parse output options
   // ====================
   if (arg == argv.end()) {
-    derr << "Missing output command" << dendl;
-    usage();
+    cerr << "Missing output command" << std::endl;
+    return -EINVAL;
   }
   std::string output_style = *(arg++);
   if (output_style != "binary" && output_style != "json" &&
       output_style != "summary" && output_style != "list") {
-      derr << "Unknown argument: '" << output_style << "'" << dendl;
-      usage();
-      return -EINVAL;
+    cerr << "Unknown argument: '" << output_style << "'" << std::endl;
+    return -EINVAL;
   }
 
   std::string output_path = "dump";
@@ -384,8 +378,7 @@ int JournalTool::main_event(std::vector<const char*> &argv)
       assert(r == 0);
       other_pool = true;
     } else {
-      derr << "Unknown argument: '" << *arg << "'" << dendl;
-      usage();
+      cerr << "Unknown argument: '" << *arg << "'" << std::endl;
       return -EINVAL;
     }
   }
@@ -500,8 +493,7 @@ int JournalTool::main_event(std::vector<const char*> &argv)
 
 
   } else {
-    derr << "Unknown argument '" << command << "'" << dendl;
-    usage();
+    cerr << "Unknown argument '" << command << "'" << std::endl;
     return -EINVAL;
   }
 
@@ -682,7 +674,7 @@ int JournalTool::recover_dentries(
     } else if (r == 0) {
       // Conditionally update existing omap header
       fnode_t old_fnode;
-      bufferlist::iterator old_fnode_iter = old_fnode_bl.begin();
+      auto old_fnode_iter = old_fnode_bl.cbegin();
       try {
         old_fnode.decode(old_fnode_iter);
         dout(4) << "frag " << frag_oid.name << " fnode old v" <<
@@ -787,7 +779,7 @@ int JournalTool::recover_dentries(
         dout(4) << "dentry exists, checking versions..." << dendl;
         bufferlist &old_dentry = read_vals[key];
         // Decode dentry+inode
-        bufferlist::iterator q = old_dentry.begin();
+        auto q = old_dentry.cbegin();
 
         snapid_t dnfirst;
         decode(dnfirst, q);
@@ -856,7 +848,7 @@ int JournalTool::recover_dentries(
         dout(4) << "dentry exists, checking versions..." << dendl;
         bufferlist &old_dentry = read_vals[key];
         // Decode dentry+inode
-        bufferlist::iterator q = old_dentry.begin();
+        auto q = old_dentry.cbegin();
 
         snapid_t dnfirst;
         decode(dnfirst, q);
@@ -912,7 +904,7 @@ int JournalTool::recover_dentries(
       if (it != read_vals.end()) {
 	dout(4) << "dentry exists, will remove" << dendl;
 
-	bufferlist::iterator q = it->second.begin();
+	auto q = it->second.cbegin();
 	snapid_t dnfirst;
 	decode(dnfirst, q);
 	char dentry_type;
@@ -988,7 +980,7 @@ int JournalTool::recover_dentries(
       InodeStore old_inode;
       dout(4) << "root exists, will modify (" << old_root_ino_bl.length()
         << ")" << dendl;
-      bufferlist::iterator inode_bl_iter = old_root_ino_bl.begin(); 
+      auto inode_bl_iter = old_root_ino_bl.cbegin(); 
       std::string magic;
       decode(magic, inode_bl_iter);
       if (magic == CEPH_FS_ONDISK_MAGIC) {
@@ -1181,7 +1173,7 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
 
     // Deserialize InoTable
     version_t inotable_ver;
-    bufferlist::iterator q = inotable_bl.begin();
+    auto q = inotable_bl.cbegin();
     decode(inotable_ver, q);
     InoTable ino_table(NULL);
     ino_table.decode(q);

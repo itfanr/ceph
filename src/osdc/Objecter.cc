@@ -151,7 +151,6 @@ enum {
 
 static const char *config_keys[] = {
   "crush_location",
-  "objecter_mclock_service_tracker",
   NULL
 };
 
@@ -223,26 +222,12 @@ void Objecter::handle_conf_change(const struct md_config_t *conf,
   if (changed.count("crush_location")) {
     update_crush_location();
   }
-  if (changed.count("objecter_mclock_service_tracker")) {
-    update_mclock_service_tracker();
-  }
 }
 
 void Objecter::update_crush_location()
 {
   unique_lock wl(rwlock);
   crush_location = cct->crush_location.get_location();
-}
-
-void Objecter::update_mclock_service_tracker()
-{
-  unique_lock wl(rwlock);
-  if (cct->_conf->objecter_mclock_service_tracker && (!mclock_service_tracker)) {
-    qos_trk = std::make_unique<dmc::ServiceTracker<int>>();
-  } else if (!cct->_conf->objecter_mclock_service_tracker) {
-    qos_trk.reset();
-  }
-  mclock_service_tracker = cct->_conf->objecter_mclock_service_tracker;
 }
 
 // messages ------------------------------
@@ -607,6 +592,10 @@ void Objecter::_linger_commit(LingerOp *info, int r, bufferlist& outbl)
     info->on_reg_commit->complete(r);
     info->on_reg_commit = NULL;
   }
+  if (r < 0 && info->on_notify_finish) {
+    info->on_notify_finish->complete(r);
+    info->on_notify_finish = nullptr;
+  }
 
   // only tell the user the first time we do this
   info->registered = true;
@@ -614,7 +603,7 @@ void Objecter::_linger_commit(LingerOp *info, int r, bufferlist& outbl)
 
   if (!info->is_watch) {
     // make note of the notify_id
-    bufferlist::iterator p = outbl.begin();
+    auto p = outbl.cbegin();
     try {
       decode(info->notify_id, p);
       ldout(cct, 10) << "_linger_commit  notify_id=" << info->notify_id
@@ -1097,9 +1086,7 @@ void Objecter::_scan_requests(
 	break;
       // -- fall-thru --
     case RECALC_OP_TARGET_NEED_RESEND:
-      if (op->session) {
-	_session_op_remove(op->session, op);
-      }
+      _session_op_remove(op->session, op);
       need_resend[op->tid] = op;
       _op_cancel_map_check(op);
       break;
@@ -1128,9 +1115,7 @@ void Objecter::_scan_requests(
       // -- fall-thru --
     case RECALC_OP_TARGET_NEED_RESEND:
       need_resend_command[c->tid] = c;
-      if (c->session) {
-	_session_command_op_remove(c->session, c);
-      }
+      _session_command_op_remove(c->session, c);
       _command_cancel_map_check(c);
       break;
     case RECALC_OP_TARGET_POOL_DNE:
@@ -1568,6 +1553,7 @@ void Objecter::_check_op_pool_dne(Op *op, unique_lock *sl)
 		     << " concluding pool " << op->target.base_pgid.pool()
 		     << " dne" << dendl;
       if (op->onfinish) {
+	num_in_flight--;
 	op->onfinish->complete(-ENOENT);
       }
 
@@ -1668,8 +1654,14 @@ void Objecter::_check_linger_pool_dne(LingerOp *op, bool *need_unregister)
   }
   if (op->map_dne_bound > 0) {
     if (osdmap->get_epoch() >= op->map_dne_bound) {
+      LingerOp::unique_lock wl{op->watch_lock};
       if (op->on_reg_commit) {
 	op->on_reg_commit->complete(-ENOENT);
+	op->on_reg_commit = nullptr;
+      }
+      if (op->on_notify_finish) {
+        op->on_notify_finish->complete(-ENOENT);
+        op->on_notify_finish = nullptr;
       }
       *need_unregister = true;
     }
@@ -1725,7 +1717,9 @@ void Objecter::C_Command_Map_Latest::finish(int r)
   if (c->map_dne_bound == 0)
     c->map_dne_bound = latest;
 
+  OSDSession::unique_lock sul(c->session->lock);
   objecter->_check_command_map_dne(c);
+  sul.unlock();
 
   c->put();
 }
@@ -1733,6 +1727,7 @@ void Objecter::C_Command_Map_Latest::finish(int r)
 void Objecter::_check_command_map_dne(CommandOp *c)
 {
   // rwlock is locked unique
+  // session is locked unique
 
   ldout(cct, 10) << "_check_command_map_dne tid " << c->tid
 		 << " current " << osdmap->get_epoch()
@@ -1750,6 +1745,7 @@ void Objecter::_check_command_map_dne(CommandOp *c)
 void Objecter::_send_command_map_check(CommandOp *c)
 {
   // rwlock is locked unique
+  // session is locked unique
 
   // ask the monitor
   if (check_latest_map_commands.count(c->tid) == 0) {
@@ -1806,7 +1802,7 @@ int Objecter::_get_session(int osd, OSDSession **session, shunique_lock& sul)
   OSDSession *s = new OSDSession(cct, osd);
   osd_sessions[osd] = s;
   s->con = messenger->get_connection(osdmap->get_inst(osd));
-  s->con->set_priv(s->get());
+  s->con->set_priv(RefCountedPtr{s});
   logger->inc(l_osdc_osd_session_open);
   logger->set(l_osdc_osd_sessions, osd_sessions.size());
   s->get();
@@ -1849,7 +1845,7 @@ void Objecter::_reopen_session(OSDSession *s)
     logger->inc(l_osdc_osd_session_close);
   }
   s->con = messenger->get_connection(inst);
-  s->con->set_priv(s->get());
+  s->con->set_priv(RefCountedPtr{s});
   s->incarnation++;
   logger->inc(l_osdc_osd_session_open);
 }
@@ -2397,7 +2393,8 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   // Try to get a session, including a retry if we need to take write lock
   int r = _get_session(op->target.osd, &s, sul);
   if (r == -EAGAIN ||
-      (check_for_latest_map && sul.owns_lock_shared())) {
+      (check_for_latest_map && sul.owns_lock_shared()) ||
+      cct->_conf->objecter_debug_inject_relock_delay) {
     epoch_t orig_epoch = osdmap->get_epoch();
     sul.unlock();
     if (cct->_conf->objecter_debug_inject_relock_delay) {
@@ -3139,8 +3136,10 @@ void Objecter::_finish_op(Op *op, int r)
 
   // op->session->lock is locked unique or op->session is null
 
-  if (!op->ctx_budgeted && op->budgeted)
-    put_op_budget(op);
+  if (!op->ctx_budgeted && op->budget >= 0) {
+    put_op_budget_bytes(op->budget);
+    op->budget = -1;
+  }
 
   if (op->ontimeout && r != -ETIMEDOUT)
     timer.cancel_event(op->ontimeout);
@@ -3216,11 +3215,6 @@ MOSDOp *Objecter::_prepare_osd_op(Op *op)
 
   if (op->reqid != osd_reqid_t()) {
     m->set_reqid(op->reqid);
-  }
-
-  if (mclock_service_tracker) {
-    dmc::ReqParams rp = qos_trk->get_req_params(op->target.osd);
-    m->set_qos_params(rp);
   }
 
   logger->inc(l_osdc_op_send);
@@ -3355,17 +3349,6 @@ int Objecter::take_linger_budget(LingerOp *info)
   return 1;
 }
 
-void Objecter::unregister_op(Op *op)
-{
-  OSDSession::unique_lock sl(op->session->lock);
-  op->session->ops.erase(op->tid);
-  sl.unlock();
-  put_session(op->session);
-  op->session = NULL;
-
-  inflight_ops--;
-}
-
 /* This function DOES put the passed message before returning */
 void Objecter::handle_osd_op_reply(MOSDOpReply *m)
 {
@@ -3381,12 +3364,10 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   }
 
   ConnectionRef con = m->get_connection();
-  OSDSession *s = static_cast<OSDSession*>(con->get_priv());
+  auto priv = con->get_priv();
+  auto s = static_cast<OSDSession*>(priv.get());
   if (!s || s->con != con) {
     ldout(cct, 7) << __func__ << " no session on con " << con << dendl;
-    if (s) {
-      s->put();
-    }
     m->put();
     return;
   }
@@ -3400,7 +3381,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
 						    " onnvram" : " ack"))
 		  << " ... stray" << dendl;
     sl.unlock();
-    s->put();
     m->put();
     return;
   }
@@ -3423,7 +3403,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
     }
     _session_op_remove(s, op);
     sl.unlock();
-    s->put();
 
     _op_submit(op, sul, NULL);
     m->put();
@@ -3439,7 +3418,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
 		    << op->session->con->get_peer_addr() << dendl;
       m->put();
       sl.unlock();
-      s->put();
       return;
     }
   } else {
@@ -3458,14 +3436,13 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
       num_in_flight--;
     _session_op_remove(s, op);
     sl.unlock();
-    s->put();
 
     // FIXME: two redirects could race and reorder
 
     op->tid = 0;
     m->get_redirect().combine_with_locator(op->target.target_oloc,
 					   op->target.target_oid.name);
-    op->target.flags |= CEPH_OSD_FLAG_REDIRECTED;
+    op->target.flags |= (CEPH_OSD_FLAG_REDIRECTED | CEPH_OSD_FLAG_IGNORE_OVERLAY);
     _op_submit(op, sul, NULL);
     m->put();
     return;
@@ -3477,7 +3454,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
       num_in_flight--;
     _session_op_remove(s, op);
     sl.unlock();
-    s->put();
 
     op->tid = 0;
     op->target.flags &= ~(CEPH_OSD_FLAG_BALANCE_READS |
@@ -3551,9 +3527,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   /* get it before we call _finish_op() */
   auto completion_lock = s->get_lock(op->target.base_oid);
 
-  if (mclock_service_tracker) {
-    qos_trk->track_resp(op->target.osd, m->get_qos_resp());
-  }
   ldout(cct, 15) << "handle_osd_op_reply completed tid " << tid << dendl;
   _finish_op(op, 0);
 
@@ -3574,7 +3547,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   }
 
   m->put();
-  s->put();
 }
 
 void Objecter::handle_osd_backoff(MOSDBackoff *m)
@@ -3587,17 +3559,15 @@ void Objecter::handle_osd_backoff(MOSDBackoff *m)
   }
 
   ConnectionRef con = m->get_connection();
-  OSDSession *s = static_cast<OSDSession*>(con->get_priv());
+  auto priv = con->get_priv();
+  auto s = static_cast<OSDSession*>(priv.get());
   if (!s || s->con != con) {
     ldout(cct, 7) << __func__ << " no session on con " << con << dendl;
-    if (s)
-      s->put();
     m->put();
     return;
   }
 
   get_session(s);
-  s->put();  // from get_priv() above
 
   OSDSession::unique_lock sl(s->lock);
 
@@ -3685,7 +3655,7 @@ uint32_t Objecter::list_nobjects_seek(NListContext *list_context,
   shared_lock rl(rwlock);
   list_context->pos = hobject_t(object_t(), string(), CEPH_NOSNAP,
 				pos, list_context->pool_id, string());
-  ldout(cct, 10) << __func__ << list_context
+  ldout(cct, 10) << __func__ << " " << list_context
 		 << " pos " << pos << " -> " << list_context->pos << dendl;
   pg_t actual = osdmap->raw_pg_to_pg(pg_t(pos, list_context->pool_id));
   list_context->current_pg = actual.ps();
@@ -3797,7 +3767,7 @@ void Objecter::_nlist_reply(NListContext *list_context, int r,
 {
   ldout(cct, 10) << __func__ << " " << list_context << dendl;
 
-  bufferlist::iterator iter = list_context->bl.begin();
+  auto iter = list_context->bl.cbegin();
   pg_nls_response_t response;
   bufferlist extra_info;
   decode(response, iter);
@@ -3895,8 +3865,12 @@ struct C_SelfmanagedSnap : public Context {
   C_SelfmanagedSnap(snapid_t *ps, Context *f) : psnapid(ps), fin(f) {}
   void finish(int r) override {
     if (r == 0) {
-      bufferlist::iterator p = bl.begin();
-      decode(*psnapid, p);
+      try {
+        auto p = bl.cbegin();
+        decode(*psnapid, p);
+      } catch (buffer::error&) {
+        r = -EIO;
+      }
     }
     fin->complete(r);
   }
@@ -4445,7 +4419,8 @@ bool Objecter::ms_handle_reset(Connection *con)
   if (!initialized)
     return false;
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_OSD) {
-    OSDSession *session = static_cast<OSDSession*>(con->get_priv());
+    auto priv = con->get_priv();
+    auto session = static_cast<OSDSession*>(priv.get());
     if (session) {
       ldout(cct, 1) << "ms_handle_reset " << con << " session " << session
 		    << " osd." << session->osd << dendl;
@@ -4462,7 +4437,6 @@ bool Objecter::ms_handle_reset(Connection *con)
       _linger_ops_resend(lresend, wl);
       wl.unlock();
       maybe_request_map();
-      session->put();
     }
     return true;
   }
@@ -4779,12 +4753,11 @@ void Objecter::handle_command_reply(MCommandReply *m)
   }
 
   ConnectionRef con = m->get_connection();
-  OSDSession *s = static_cast<OSDSession*>(con->get_priv());
+  auto priv = con->get_priv();
+  auto s = static_cast<OSDSession*>(priv.get());
   if (!s || s->con != con) {
     ldout(cct, 7) << __func__ << " no session on con " << con << dendl;
     m->put();
-    if (s)
-      s->put();
     return;
   }
 
@@ -4795,8 +4768,6 @@ void Objecter::handle_command_reply(MCommandReply *m)
 		   << " not found" << dendl;
     m->put();
     sl.unlock();
-    if (s)
-      s->put();
     return;
   }
 
@@ -4809,8 +4780,6 @@ void Objecter::handle_command_reply(MCommandReply *m)
 		   << dendl;
     m->put();
     sl.unlock();
-    if (s)
-      s->put();
     return;
   }
   if (c->poutbl) {
@@ -4819,11 +4788,11 @@ void Objecter::handle_command_reply(MCommandReply *m)
 
   sl.unlock();
 
-
+  OSDSession::unique_lock sul(s->lock);
   _finish_command(c, m->r, m->rs);
+  sul.unlock();
+
   m->put();
-  if (s)
-    s->put();
 }
 
 void Objecter::submit_command(CommandOp *c, ceph_tid_t *ptid)
@@ -4967,13 +4936,16 @@ int Objecter::command_op_cancel(OSDSession *s, ceph_tid_t tid, int r)
 
   CommandOp *op = it->second;
   _command_cancel_map_check(op);
+  OSDSession::unique_lock sl(op->session->lock);
   _finish_command(op, r, "");
+  sl.unlock();
   return 0;
 }
 
 void Objecter::_finish_command(CommandOp *c, int r, string rs)
 {
   // rwlock is locked unique
+  // session lock is locked
 
   ldout(cct, 10) << "_finish_command " << c->tid << " = " << r << " "
 		 << rs << dendl;
@@ -4985,10 +4957,7 @@ void Objecter::_finish_command(CommandOp *c, int r, string rs)
   if (c->ontimeout && r != -ETIMEDOUT)
     timer.cancel_event(c->ontimeout);
 
-  OSDSession *s = c->session;
-  OSDSession::unique_lock sl(s->lock);
   _session_command_op_remove(c->session, c);
-  sl.unlock();
 
   c->put();
 
@@ -5076,7 +5045,7 @@ struct C_EnumerateReply : public Context {
       const hobject_t end_, const int64_t pool_id_, Context *on_finish_) :
     objecter(objecter_), next(next_), result(result_),
     end(end_), pool_id(pool_id_), on_finish(on_finish_),
-    epoch(0), budget(0)
+    epoch(0), budget(-1)
   {}
 
   void finish(int r) override {
@@ -5160,7 +5129,7 @@ void Objecter::_enumerate_reply(
     hobject_t *next,
     Context *on_finish)
 {
-  if (budget > 0) {
+  if (budget >= 0) {
     put_op_budget_bytes(budget);
   }
 
@@ -5173,7 +5142,7 @@ void Objecter::_enumerate_reply(
   assert(next != NULL);
 
   // Decode the results
-  bufferlist::iterator iter = bl.begin();
+  auto iter = bl.cbegin();
   pg_nls_response_t response;
 
   // XXX extra_info doesn't seem used anywhere?
@@ -5245,7 +5214,7 @@ namespace {
   void do_decode(std::vector<T>& items, std::vector<bufferlist>& bls)
   {
     for (auto bl : bls) {
-      auto p = bl.begin();
+      auto p = bl.cbegin();
       T t;
       decode(t, p);
       items.push_back(t);
@@ -5287,7 +5256,7 @@ namespace {
   private:
     void decode() {
       scrub_ls_result_t result;
-      auto p = bl.begin();
+      auto p = bl.cbegin();
       result.decode(p);
       *interval = result.interval;
       if (objects) {

@@ -46,7 +46,10 @@ ostream& operator<<(ostream &out, const Inode &in)
       << " open=" << in.open_by_mode
       << " mode=" << oct << in.mode << dec
       << " size=" << in.size << "/" << in.max_size
+      << " nlink=" << in.nlink
+      << " btime=" << in.btime
       << " mtime=" << in.mtime
+      << " ctime=" << in.ctime
       << " caps=" << ccap_string(in.caps_issued());
   if (!in.caps.empty()) {
     out << "(";
@@ -542,7 +545,7 @@ void Inode::dump(Formatter *f) const
 void Cap::dump(Formatter *f) const
 {
   f->dump_int("mds", session->mds_num);
-  f->dump_stream("ino") << inode->ino;
+  f->dump_stream("ino") << inode.ino;
   f->dump_unsigned("cap_id", cap_id);
   f->dump_stream("issued") << ccap_string(issued);
   if (implemented != issued)

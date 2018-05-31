@@ -1,16 +1,15 @@
-import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Component, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 
+import { CephfsService } from '../../../shared/api/cephfs.service';
 import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
-import { CephfsService } from '../cephfs.service';
 
 @Component({
   selector: 'cd-clients',
   templateUrl: './clients.component.html',
   styleUrls: ['./clients.component.scss']
 })
-export class ClientsComponent implements OnInit, OnDestroy {
-  routeParamsSubscribe: any;
+export class ClientsComponent implements OnInit {
 
   id: number;
   name: string;
@@ -32,7 +31,7 @@ export class ClientsComponent implements OnInit, OnDestroy {
       data: []
     };
 
-    this.routeParamsSubscribe = this.route.params.subscribe((params: { id: number }) => {
+    this.route.params.subscribe((params: { id: number }) => {
       this.id = params.id;
       this.clients.data = [];
       this.viewCacheStatus = ViewCacheStatus.ValueNone;
@@ -41,10 +40,6 @@ export class ClientsComponent implements OnInit, OnDestroy {
         this.name = data.cephfs.name;
       });
     });
-  }
-
-  ngOnDestroy() {
-    this.routeParamsSubscribe.unsubscribe();
   }
 
   refresh() {

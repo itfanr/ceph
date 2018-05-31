@@ -201,6 +201,20 @@ class Eval:
         return r
 
 class Module(MgrModule):
+    OPTIONS = [
+            {'name': 'active'},
+            {'name': 'begin_time'},
+            {'name': 'crush_compat_max_iterations'},
+            {'name': 'crush_compat_step'},
+            {'name': 'end_time'},
+            {'name': 'max_misplaced'},
+            {'name': 'min_score'},
+            {'name': 'mode'},
+            {'name': 'sleep_interval'},
+            {'name': 'upmap_max_iterations'},
+            {'name': 'upmap_max_deviation'},
+    ]
+
     COMMANDS = [
         {
             "cmd": "balancer status",
@@ -255,6 +269,11 @@ class Module(MgrModule):
         {
             "cmd": "balancer dump name=plan,type=CephString",
             "desc": "Show an optimization plan",
+            "perm": "r",
+        },
+        {
+            "cmd": "balancer ls",
+            "desc": "List all plans",
             "perm": "r",
         },
         {
@@ -343,6 +362,8 @@ class Module(MgrModule):
         elif command['prefix'] == 'balancer reset':
             self.plans = {}
             return (0, '', '')
+        elif command['prefix'] == 'balancer ls':
+            return (0, json.dumps([p for p in self.plans], indent=4), '')
         elif command['prefix'] == 'balancer dump':
             plan = self.plans.get(command['plan'])
             if not plan:
@@ -747,11 +768,13 @@ class Module(MgrModule):
         for root, wm in pe.target_by_root.iteritems():
             for osd in wm.iterkeys():
                 if osd in visited:
-                    overlap[osd] = 1
-                visited[osd] = 1
+                    if osd not in overlap:
+                        overlap[osd] = [ visited[osd] ]
+                    overlap[osd].append(root)
+                visited[osd] = root
         if len(overlap) > 0:
             detail = 'Some osds belong to multiple subtrees: %s' % \
-                     overlap.keys()
+                     overlap
             self.log.error(detail)
             return -errno.EOPNOTSUPP, detail
 

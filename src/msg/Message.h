@@ -125,6 +125,9 @@
 #define MSG_OSD_REP_SCRUBMAP    117
 #define MSG_OSD_PG_RECOVERY_DELETE 118
 #define MSG_OSD_PG_RECOVERY_DELETE_REPLY 119
+#define MSG_OSD_PG_CREATE2      120
+#define MSG_OSD_SCRUB2          121
+
 
 // *** MDS ***
 
@@ -150,7 +153,7 @@
 #define MSG_MDS_FINDINOREPLY       0x20e
 #define MSG_MDS_OPENINO            0x20f
 #define MSG_MDS_OPENINOREPLY       0x210
-
+#define MSG_MDS_SNAPUPDATE         0x211
 #define MSG_MDS_LOCK               0x300
 #define MSG_MDS_INODEFILECAPS      0x301
 
@@ -191,6 +194,7 @@
 #define MSG_NOP                   0x607
 
 #define MSG_MON_HEALTH_CHECKS     0x608
+#define MSG_TIMECHECK2            0x609
 
 // *** ceph-mgr <-> OSD/MDS daemons ***
 #define MSG_MGR_OPEN              0x700
@@ -208,6 +212,8 @@
 // *** cephmgr -> ceph-mon
 #define MSG_MON_MGR_REPORT        0x706
 #define MSG_SERVICE_MAP           0x707
+
+#define MSG_MGR_CLOSE             0x708
 
 // ======================================================
 
@@ -256,7 +262,7 @@ public:
   // zipkin tracing
   ZTracer::Trace trace;
   void encode_trace(bufferlist &bl, uint64_t features) const;
-  void decode_trace(bufferlist::iterator &p, bool create = false);
+  void decode_trace(bufferlist::const_iterator &p, bool create = false);
 
   class CompletionHook : public Context {
   protected:
@@ -501,6 +507,6 @@ inline ostream& operator<<(ostream& out, const Message& m) {
 
 extern void encode_message(Message *m, uint64_t features, bufferlist& bl);
 extern Message *decode_message(CephContext *cct, int crcflags,
-                               bufferlist::iterator& bl);
+                               bufferlist::const_iterator& bl);
 
 #endif

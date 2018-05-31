@@ -128,6 +128,7 @@ if [ x`uname`x = xFreeBSDx ]; then
         net/openldap-client \
         security/nss \
         archivers/snappy \
+        archivers/liblz4 \
         ftp/curl \
         misc/e2fsprogs-libuuid \
         misc/getopt \
@@ -146,8 +147,10 @@ if [ x`uname`x = xFreeBSDx ]; then
         devel/py-argparse \
         devel/py-nose \
         devel/py-prettytable \
+	www/py-routes \
         www/py-flask \
         www/fcgi \
+	security/oath-toolkit \
         sysutils/flock \
         sysutils/fusefs-libs \
 
@@ -253,7 +256,7 @@ else
 	fi
         ! grep -q -i error: $DIR/yum-builddep.out || exit 1
         ;;
-    opensuse|suse|sles)
+    opensuse|suse|sles|opensuse-tumbleweed)
         echo "Using zypper to install dependencies"
         zypp_install="zypper --gpg-auto-import-keys --non-interactive install --no-recommends"
         $SUDO $zypp_install lsb-release systemd-rpm-macros
@@ -330,6 +333,12 @@ find . -name tox.ini | while read ini ; do
     (
         cd $(dirname $ini)
         require=$(ls *requirements.txt 2>/dev/null | sed -e 's/^/-r /')
+        md5=wheelhouse/md5
+        if test "$require"; then
+            if ! test -f $md5 || ! md5sum -c $md5 ; then
+                rm -rf wheelhouse
+            fi
+        fi
         if test "$require" && ! test -d wheelhouse ; then
             for interpreter in python2.7 python3 ; do
                 type $interpreter > /dev/null 2>&1 || continue
@@ -337,6 +346,7 @@ find . -name tox.ini | while read ini ; do
                 populate_wheelhouse "wheel -w $wip_wheelhouse" $require || exit 1
             done
             mv $wip_wheelhouse wheelhouse
+            md5sum *requirements.txt > $md5
         fi
     )
 done

@@ -14,6 +14,7 @@
 
 
 #include <sstream>
+#include <tuple>
 #include <stdlib.h>
 #include <signal.h>
 #include <limits.h>
@@ -50,7 +51,7 @@
 
 #include "messages/MAuthReply.h"
 
-#include "messages/MTimeCheck.h"
+#include "messages/MTimeCheck2.h"
 #include "messages/MPing.h"
 
 #include "common/strtol.h"
@@ -172,12 +173,22 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   paxos_service(PAXOS_NUM),
   admin_hook(NULL),
   routed_request_tid(0),
-  op_tracker(cct, true, 1)
+  op_tracker(cct, g_conf->get_val<bool>("mon_enable_op_tracker"), 1)
 {
   clog = log_client.create_channel(CLOG_CHANNEL_CLUSTER);
   audit_clog = log_client.create_channel(CLOG_CHANNEL_AUDIT);
 
   update_log_clients();
+
+  op_tracker.set_complaint_and_threshold(
+      g_conf->get_val<std::chrono::seconds>("mon_op_complaint_time").count(),
+      g_conf->get_val<int64_t>("mon_op_log_threshold"));
+  op_tracker.set_history_size_and_duration(
+      g_conf->get_val<uint64_t>("mon_op_history_size"),
+      g_conf->get_val<std::chrono::seconds>("mon_op_history_duration").count());
+  op_tracker.set_history_slow_op_size_and_threshold(
+      g_conf->get_val<uint64_t>("mon_op_history_slow_op_size"),
+      g_conf->get_val<std::chrono::seconds>("mon_op_history_slow_op_threshold").count());
 
   paxos = new Paxos(this, "paxos");
 
@@ -310,6 +321,27 @@ void Monitor::do_admin_command(std::string_view command, const cmdmap_t& cmdmap,
       f->flush(ss);
     }
 
+  } else if (command == "dump_historic_ops") {
+    if (op_tracker.dump_historic_ops(f.get())) {
+      f->flush(ss);
+    } else {
+      ss << "op_tracker tracking is not enabled now, so no ops are tracked currently, even those get stuck. \
+        please enable \"mon_enable_op_tracker\", and the tracker will start to track new ops received afterwards.";
+    }
+  } else if (command == "dump_historic_ops_by_duration" ) {
+    if (op_tracker.dump_historic_ops(f.get(), true)) {
+      f->flush(ss);
+    } else {
+      ss << "op_tracker tracking is not enabled now, so no ops are tracked currently, even those get stuck. \
+        please enable \"mon_enable_op_tracker\", and the tracker will start to track new ops received afterwards.";
+    }
+  } else if (command == "dump_historic_slow_ops") {
+    if (op_tracker.dump_historic_slow_ops(f.get(), {})) {
+      f->flush(ss);
+    } else {
+      ss << "op_tracker tracking is not enabled now, so no ops are tracked currently, even those get stuck. \
+        please enable \"mon_enable_op_tracker\", and the tracker will start to track new ops received afterwards.";
+    }
   } else {
     assert(0 == "bad AdminSocket command binding");
   }
@@ -356,6 +388,7 @@ CompatSet Monitor::get_supported_features()
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_KRAKEN);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_LUMINOUS);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_MIMIC);
+  compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_NAUTILUS);
   return compat;
 }
 
@@ -402,7 +435,7 @@ void Monitor::read_features_off_disk(MonitorDBStore *store, CompatSet *features)
     t->put(MONITOR_NAME, COMPAT_SET_LOC, featuresbl);
     store->apply_transaction(t);
   } else {
-    bufferlist::iterator it = featuresbl.begin();
+    auto it = featuresbl.cbegin();
     features->decode(it);
   }
 }
@@ -449,6 +482,14 @@ const char** Monitor::get_tracked_conf_keys() const
     // scrub interval
     "mon_scrub_interval",
     "mon_allow_pool_delete",
+    // osdmap pruning - observed, not handled.
+    "mon_osdmap_full_prune_enabled",
+    "mon_osdmap_full_prune_min",
+    "mon_osdmap_full_prune_interval",
+    "mon_osdmap_full_prune_txsize",
+    // debug options - observed, not handled
+    "mon_debug_extra_checks",
+    "mon_debug_block_osdmap_trim",
     NULL
   };
   return KEYS;
@@ -685,7 +726,7 @@ int Monitor::preinit()
       if (err == 0 && bl.length() > 0) {
         // Attempt to decode and extract keyring only if it is found.
         KeyRing keyring;
-        bufferlist::iterator p = bl.begin();
+        auto p = bl.cbegin();
         decode(keyring, p);
         extract_save_mon_key(keyring);
       }
@@ -755,6 +796,18 @@ int Monitor::preinit()
                                      admin_hook,
                                      "list existing sessions");
   assert(r == 0);
+  r = admin_socket->register_command("dump_historic_ops", "dump_historic_ops",
+                                     admin_hook,
+                                    "show recent ops");
+  assert(r == 0);
+  r = admin_socket->register_command("dump_historic_ops_by_duration", "dump_historic_ops_by_duration",
+                                     admin_hook,
+                                    "show recent ops, sorted by duration");
+  assert(r == 0);
+  r = admin_socket->register_command("dump_historic_slow_ops", "dump_historic_slow_ops",
+                                     admin_hook,
+                                    "show recent slow ops");
+  assert(r == 0);
 
   lock.Lock();
 
@@ -812,7 +865,7 @@ void Monitor::refresh_from_paxos(bool *need_bootstrap)
   int r = store->get(MONITOR_NAME, "cluster_fingerprint", bl);
   if (r >= 0) {
     try {
-      bufferlist::iterator p = bl.begin();
+      auto p = bl.cbegin();
       decode(fingerprint, p);
     }
     catch (buffer::error& e) {
@@ -881,6 +934,9 @@ void Monitor::shutdown()
     admin_socket->unregister_command("quorum exit");
     admin_socket->unregister_command("ops");
     admin_socket->unregister_command("sessions");
+    admin_socket->unregister_command("dump_historic_ops");
+    admin_socket->unregister_command("dump_historic_ops_by_duration");
+    admin_socket->unregister_command("dump_historic_slow_ops");
     delete admin_hook;
     admin_hook = NULL;
   }
@@ -949,6 +1005,12 @@ void Monitor::bootstrap()
   unregister_cluster_logger();
   cancel_probe_timeout();
 
+  if (monmap->get_epoch() == 0) {
+    dout(10) << "reverting to legacy ranks for seed monmap (epoch 0)" << dendl;
+    monmap->calc_legacy_ranks();
+  }
+  dout(10) << "monmap " << *monmap << dendl;
+
   // note my rank
   int newrank = monmap->get_rank(messenger->get_myaddr());
   if (newrank < 0 && rank >= 0) {
@@ -995,8 +1057,9 @@ void Monitor::bootstrap()
   dout(10) << "probing other monitors" << dendl;
   for (unsigned i = 0; i < monmap->size(); i++) {
     if ((int)i != rank)
-      messenger->send_message(new MMonProbe(monmap->fsid, MMonProbe::OP_PROBE, name, has_ever_joined),
-			      monmap->get_inst(i));
+      send_mon_message(
+	new MMonProbe(monmap->fsid, MMonProbe::OP_PROBE, name, has_ever_joined),
+	i);
   }
   for (set<entity_addr_t>::iterator p = extra_probe_peers.begin();
        p != extra_probe_peers.end();
@@ -1005,7 +1068,9 @@ void Monitor::bootstrap()
       entity_inst_t i;
       i.name = entity_name_t::MON(-1);
       i.addr = *p;
-      messenger->send_message(new MMonProbe(monmap->fsid, MMonProbe::OP_PROBE, name, has_ever_joined), i);
+      messenger->send_message(
+	new MMonProbe(monmap->fsid, MMonProbe::OP_PROBE, name, has_ever_joined),
+	i);
     }
   }
 }
@@ -1809,8 +1874,9 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
       start_election();
     } else {
       dout(10) << " ready to join, but i'm not in the monmap or my addr is blank, trying to join" << dendl;
-      messenger->send_message(new MMonJoin(monmap->fsid, name, messenger->get_myaddr()),
-                              monmap->get_inst(*m->quorum.begin()));
+      send_mon_message(
+	new MMonJoin(monmap->fsid, name, messenger->get_myaddr()),
+	*m->quorum.begin());
     }
   } else {
     if (monmap->contains(m->name)) {
@@ -2013,10 +2079,29 @@ void Monitor::lose_election(epoch_t epoch, set<int> &q, int l,
   finish_election();
 }
 
+namespace {
+std::string collect_compression_algorithms()
+{
+  ostringstream os;
+  bool printed = false;
+  for (auto [name, key] : Compressor::compression_algorithms) {
+    if (printed) {
+      os << ", ";
+    } else {
+      printed = true;
+    }
+    std::ignore = key;
+    os << name;
+  }
+  return os.str();
+}
+}
+
 void Monitor::collect_metadata(Metadata *m)
 {
   collect_sys_info(m, g_ceph_context);
   (*m)["addr"] = stringify(messenger->get_myaddr());
+  (*m)["compression_algorithms"] = collect_compression_algorithms();
 }
 
 void Monitor::finish_election()
@@ -2035,8 +2120,9 @@ void Monitor::finish_election()
   string cur_name = monmap->get_name(messenger->get_myaddr());
   if (cur_name != name) {
     dout(10) << " renaming myself from " << cur_name << " -> " << name << dendl;
-    messenger->send_message(new MMonJoin(monmap->fsid, name, messenger->get_myaddr()),
-			    monmap->get_inst(*quorum.begin()));
+    send_mon_message(
+      new MMonJoin(monmap->fsid, name, messenger->get_myaddr()),
+      *quorum.begin());
   }
 }
 
@@ -2104,6 +2190,13 @@ void Monitor::apply_monmap_to_compatset_features()
     assert(HAVE_FEATURE(quorum_con_features, SERVER_MIMIC));
     new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_MIMIC);
   }
+  if (monmap_features.contains_all(ceph::features::mon::FEATURE_NAUTILUS)) {
+    assert(ceph::features::mon::get_persistent().contains_all(
+           ceph::features::mon::FEATURE_NAUTILUS));
+    // this feature should only ever be set if the quorum supports it.
+    assert(HAVE_FEATURE(quorum_con_features, SERVER_NAUTILUS));
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_NAUTILUS);
+  }
 
   dout(5) << __func__ << dendl;
   _apply_compatset_features(new_features);
@@ -2126,6 +2219,9 @@ void Monitor::calc_quorum_requirements()
   if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_MIMIC)) {
     required_features |= CEPH_FEATUREMASK_SERVER_MIMIC;
   }
+  if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_NAUTILUS)) {
+    required_features |= CEPH_FEATUREMASK_SERVER_NAUTILUS;
+  }
 
   // monmap
   if (monmap->get_required_features().contains_all(
@@ -2139,6 +2235,10 @@ void Monitor::calc_quorum_requirements()
   if (monmap->get_required_features().contains_all(
 	ceph::features::mon::FEATURE_MIMIC)) {
     required_features |= CEPH_FEATUREMASK_SERVER_MIMIC;
+  }
+  if (monmap->get_required_features().contains_all(
+	ceph::features::mon::FEATURE_NAUTILUS)) {
+    required_features |= CEPH_FEATUREMASK_SERVER_NAUTILUS;
   }
   dout(10) << __func__ << " required_features " << required_features << dendl;
 }
@@ -2834,15 +2934,12 @@ void Monitor::handle_command(MonOpRequestRef op)
     return;
   }
 
-  MonSession *session = static_cast<MonSession *>(
-    m->get_connection()->get_priv());
+  auto priv = m->get_connection()->get_priv();
+  auto session = static_cast<MonSession *>(priv.get());
   if (!session) {
     dout(5) << __func__ << " dropping stray message " << *m << dendl;
     return;
   }
-  BOOST_SCOPE_EXIT_ALL(=) {
-    session->put();
-  };
 
   if (m->cmd.empty()) {
     string rs = "No command supplied";
@@ -3144,10 +3241,9 @@ void Monitor::handle_command(MonOpRequestRef op)
     if (!timecheck_skews.empty()) {
       f->open_object_section("time_skew_status");
       for (auto& i : timecheck_skews) {
-	entity_inst_t inst = i.first;
 	double skew = i.second;
-	double latency = timecheck_latencies[inst];
-	string name = monmap->get_name(inst.addr);
+	double latency = timecheck_latencies[i.first];
+	string name = monmap->get_name(i.first);
 	ostringstream tcss;
 	health_status_t tcstatus = timecheck_status(tcss, skew, latency);
 	f->open_object_section(name.c_str());
@@ -3586,7 +3682,7 @@ void Monitor::forward_request_leader(MonOpRequestRef op)
     } else if (req->get_source().is_mon()) {
       forward->entity_name.set_type(CEPH_ENTITY_TYPE_MON);
     }
-    messenger->send_message(forward, monmap->get_inst(mon));
+    send_mon_message(forward, mon);
     op->mark_forwarded();
     assert(op->get_req()->get_type() != 0);
   } else {
@@ -3634,7 +3730,7 @@ void Monitor::handle_forward(MonOpRequestRef op)
     ConnectionRef c(new AnonConnection(cct));
     MonSession *s = new MonSession(req->get_source_inst(),
 				   static_cast<Connection*>(c.get()));
-    c->set_priv(s->get());
+    c->set_priv(RefCountedPtr{s, false});
     c->set_peer_addr(m->client.addr);
     c->set_peer_type(m->client.name.type());
     c->set_features(m->con_features);
@@ -3672,7 +3768,6 @@ void Monitor::handle_forward(MonOpRequestRef op)
     dout(10) << " mesg " << req << " from " << m->get_source_addr() << dendl;
 
     _ms_dispatch(req);
-    s->put();
   }
 }
 
@@ -3687,7 +3782,7 @@ void Monitor::try_send_message(Message *m, const entity_inst_t& to)
 
   for (int i=0; i<(int)monmap->size(); i++) {
     if (i != rank)
-      messenger->send_message(new MRoute(bl, to), monmap->get_inst(i));
+      send_mon_message(new MRoute(bl, to), i);
   }
 }
 
@@ -3816,7 +3911,7 @@ void Monitor::resend_routed_requests()
       }
       delete rr;
     } else {
-      bufferlist::iterator q = rr->request_bl.begin();
+      auto q = rr->request_bl.cbegin();
       PaxosServiceMessage *req = (PaxosServiceMessage *)decode_message(cct, 0, q);
       rr->op->mark_event("resend forwarded message to leader");
       dout(10) << " resend to mon." << mon << " tid " << rr->tid << " " << *req << dendl;
@@ -3825,7 +3920,7 @@ void Monitor::resend_routed_requests()
       req->put();  // forward takes its own ref; drop ours.
       forward->client = rr->client_inst;
       forward->set_priority(req->get_priority());
-      messenger->send_message(forward, monmap->get_inst(mon));
+      send_mon_message(forward, mon);
     }
   }
   if (mon == rank) {
@@ -3850,7 +3945,7 @@ void Monitor::remove_session(MonSession *s)
     routed_requests.erase(*p);
   }
   s->routed_request_tids.clear();
-  s->con->set_priv(NULL);
+  s->con->set_priv(nullptr);
   session_map.remove_session(s);
   logger->set(l_mon_num_sessions, session_map.get_size());
   logger->inc(l_mon_session_rm);
@@ -3875,6 +3970,11 @@ void Monitor::send_command(const entity_inst_t& inst,
   MMonCommand *c = new MMonCommand(monmap->fsid);
   c->cmd = com;
   try_send_message(c, inst);
+}
+
+void Monitor::send_mon_message(Message *m, int rank)
+{
+  messenger->send_message(m, monmap->get_inst(rank));
 }
 
 void Monitor::waitlist_or_zap_client(MonOpRequestRef op)
@@ -3973,7 +4073,7 @@ void Monitor::_ms_dispatch(Message *m)
       s = session_map.new_session(m->get_source_inst(), con.get());
     }
     assert(s);
-    con->set_priv(s->get());
+    con->set_priv(RefCountedPtr{s, false});
     dout(10) << __func__ << " new session " << s << " " << *s
 	     << " features 0x" << std::hex
 	     << s->con_features << std::dec << dendl;
@@ -3989,7 +4089,6 @@ void Monitor::_ms_dispatch(Message *m)
         s->caps = *mon_caps;
       s->authenticated = true;
     }
-    s->put();
   } else {
     dout(20) << __func__ << " existing session " << s << " for " << s->inst
 	     << dendl;
@@ -4233,6 +4332,9 @@ void Monitor::dispatch_op(MonOpRequestRef op)
       return;
 
     case MSG_TIMECHECK:
+      dout(5) << __func__ << " ignoring " << op << dendl;
+      return;
+    case MSG_TIMECHECK2:
       handle_timecheck(op);
       return;
 
@@ -4254,7 +4356,6 @@ void Monitor::handle_ping(MonOpRequestRef op)
   MPing *m = static_cast<MPing*>(op->get_req());
   dout(10) << __func__ << " " << *m << dendl;
   MPing *reply = new MPing;
-  entity_inst_t inst = m->get_source_inst();
   bufferlist payload;
   boost::scoped_ptr<Formatter> f(new JSONFormatter(true));
   f->open_object_section("pong");
@@ -4271,14 +4372,17 @@ void Monitor::handle_ping(MonOpRequestRef op)
   encode(ss.str(), payload);
   reply->set_payload(payload);
   dout(10) << __func__ << " reply payload len " << reply->get_payload().length() << dendl;
-  messenger->send_message(reply, inst);
+  m->get_connection()->send_message(reply);
 }
 
 void Monitor::timecheck_start()
 {
   dout(10) << __func__ << dendl;
   timecheck_cleanup();
-  timecheck_start_round();
+  if (get_quorum_mon_features().contains_all(
+	ceph::features::mon::FEATURE_NAUTILUS)) {
+    timecheck_start_round();
+  }
 }
 
 void Monitor::timecheck_finish()
@@ -4340,9 +4444,8 @@ void Monitor::timecheck_finish_round(bool success)
 
   dout(10) << __func__ << " " << timecheck_waiting.size()
            << " peers still waiting:";
-  for (map<entity_inst_t,utime_t>::iterator p = timecheck_waiting.begin();
-      p != timecheck_waiting.end(); ++p) {
-    *_dout << " " << p->first.name;
+  for (auto& p : timecheck_waiting) {
+    *_dout << " mon." << p.first;
   }
   *_dout << dendl;
   timecheck_waiting.clear();
@@ -4409,13 +4512,11 @@ void Monitor::timecheck_check_skews()
   assert(timecheck_latencies.size() == timecheck_skews.size());
 
   bool found_skew = false;
-  for (map<entity_inst_t, double>::iterator p = timecheck_skews.begin();
-       p != timecheck_skews.end(); ++p) {
-
+  for (auto& p : timecheck_skews) {
     double abs_skew;
-    if (timecheck_has_skew(p->second, &abs_skew)) {
+    if (timecheck_has_skew(p.second, &abs_skew)) {
       dout(10) << __func__
-               << " " << p->first << " skew " << abs_skew << dendl;
+               << " " << p.first << " skew " << abs_skew << dendl;
       found_skew = true;
     }
   }
@@ -4452,28 +4553,26 @@ void Monitor::timecheck_report()
     if (monmap->get_name(*q) == name)
       continue;
 
-    MTimeCheck *m = new MTimeCheck(MTimeCheck::OP_REPORT);
+    MTimeCheck2 *m = new MTimeCheck2(MTimeCheck2::OP_REPORT);
     m->epoch = get_epoch();
     m->round = timecheck_round;
 
-    for (map<entity_inst_t, double>::iterator it = timecheck_skews.begin();
-         it != timecheck_skews.end(); ++it) {
-      double skew = it->second;
-      double latency = timecheck_latencies[it->first];
+    for (auto& it : timecheck_skews) {
+      double skew = it.second;
+      double latency = timecheck_latencies[it.first];
 
-      m->skews[it->first] = skew;
-      m->latencies[it->first] = latency;
+      m->skews[it.first] = skew;
+      m->latencies[it.first] = latency;
 
       if (do_output) {
-        dout(25) << __func__ << " " << it->first
+        dout(25) << __func__ << " mon." << it.first
                  << " latency " << latency
                  << " skew " << skew << dendl;
       }
     }
     do_output = false;
-    entity_inst_t inst = monmap->get_inst(*q);
-    dout(10) << __func__ << " send report to " << inst << dendl;
-    messenger->send_message(m, inst);
+    dout(10) << __func__ << " send report to mon." << *q << dendl;
+    send_mon_message(m, *q);
   }
 }
 
@@ -4493,21 +4592,20 @@ void Monitor::timecheck()
            << " round " << timecheck_round << dendl;
 
   // we are at the eye of the storm; the point of reference
-  timecheck_skews[messenger->get_myinst()] = 0.0;
-  timecheck_latencies[messenger->get_myinst()] = 0.0;
+  timecheck_skews[rank] = 0.0;
+  timecheck_latencies[rank] = 0.0;
 
   for (set<int>::iterator it = quorum.begin(); it != quorum.end(); ++it) {
     if (monmap->get_name(*it) == name)
       continue;
 
-    entity_inst_t inst = monmap->get_inst(*it);
     utime_t curr_time = ceph_clock_now();
-    timecheck_waiting[inst] = curr_time;
-    MTimeCheck *m = new MTimeCheck(MTimeCheck::OP_PING);
+    timecheck_waiting[*it] = curr_time;
+    MTimeCheck2 *m = new MTimeCheck2(MTimeCheck2::OP_PING);
     m->epoch = get_epoch();
     m->round = timecheck_round;
-    dout(10) << __func__ << " send " << *m << " to " << inst << dendl;
-    messenger->send_message(m, inst);
+    dout(10) << __func__ << " send " << *m << " to mon." << *it << dendl;
+    send_mon_message(m, *it);
   }
 }
 
@@ -4530,12 +4628,12 @@ health_status_t Monitor::timecheck_status(ostringstream &ss,
 
 void Monitor::handle_timecheck_leader(MonOpRequestRef op)
 {
-  MTimeCheck *m = static_cast<MTimeCheck*>(op->get_req());
+  MTimeCheck2 *m = static_cast<MTimeCheck2*>(op->get_req());
   dout(10) << __func__ << " " << *m << dendl;
   /* handles PONG's */
-  assert(m->op == MTimeCheck::OP_PONG);
+  assert(m->op == MTimeCheck2::OP_PONG);
 
-  entity_inst_t other = m->get_source_inst();
+  int other = m->get_source().num();
   if (m->epoch < get_epoch()) {
     dout(1) << __func__ << " got old timecheck epoch " << m->epoch
             << " from " << other
@@ -4648,11 +4746,11 @@ void Monitor::handle_timecheck_leader(MonOpRequestRef op)
 
 void Monitor::handle_timecheck_peon(MonOpRequestRef op)
 {
-  MTimeCheck *m = static_cast<MTimeCheck*>(op->get_req());
+  MTimeCheck2 *m = static_cast<MTimeCheck2*>(op->get_req());
   dout(10) << __func__ << " " << *m << dendl;
 
   assert(is_peon());
-  assert(m->op == MTimeCheck::OP_PING || m->op == MTimeCheck::OP_REPORT);
+  assert(m->op == MTimeCheck2::OP_PING || m->op == MTimeCheck2::OP_REPORT);
 
   if (m->epoch != get_epoch()) {
     dout(1) << __func__ << " got wrong epoch "
@@ -4670,7 +4768,7 @@ void Monitor::handle_timecheck_peon(MonOpRequestRef op)
 
   timecheck_round = m->round;
 
-  if (m->op == MTimeCheck::OP_REPORT) {
+  if (m->op == MTimeCheck2::OP_REPORT) {
     assert((timecheck_round % 2) == 0);
     timecheck_latencies.swap(m->latencies);
     timecheck_skews.swap(m->skews);
@@ -4678,7 +4776,7 @@ void Monitor::handle_timecheck_peon(MonOpRequestRef op)
   }
 
   assert((timecheck_round % 2) != 0);
-  MTimeCheck *reply = new MTimeCheck(MTimeCheck::OP_PONG);
+  MTimeCheck2 *reply = new MTimeCheck2(MTimeCheck2::OP_PONG);
   utime_t curr_time = ceph_clock_now();
   reply->timestamp = curr_time;
   reply->epoch = m->epoch;
@@ -4690,17 +4788,17 @@ void Monitor::handle_timecheck_peon(MonOpRequestRef op)
 
 void Monitor::handle_timecheck(MonOpRequestRef op)
 {
-  MTimeCheck *m = static_cast<MTimeCheck*>(op->get_req());
+  MTimeCheck2 *m = static_cast<MTimeCheck2*>(op->get_req());
   dout(10) << __func__ << " " << *m << dendl;
 
   if (is_leader()) {
-    if (m->op != MTimeCheck::OP_PONG) {
+    if (m->op != MTimeCheck2::OP_PONG) {
       dout(1) << __func__ << " drop unexpected msg (not pong)" << dendl;
     } else {
       handle_timecheck_leader(op);
     }
   } else if (is_peon()) {
-    if (m->op != MTimeCheck::OP_PING && m->op != MTimeCheck::OP_REPORT) {
+    if (m->op != MTimeCheck2::OP_PING && m->op != MTimeCheck2::OP_REPORT) {
       dout(1) << __func__ << " drop unexpected msg (not ping or report)" << dendl;
     } else {
       handle_timecheck_peon(op);
@@ -4852,12 +4950,13 @@ bool Monitor::ms_handle_reset(Connection *con)
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_MON)
     return false;
 
-  MonSession *s = static_cast<MonSession *>(con->get_priv());
+  auto priv = con->get_priv();
+  auto s = static_cast<MonSession*>(priv.get());
   if (!s)
     return false;
 
   // break any con <-> session ref cycle
-  s->con->set_priv(NULL);
+  s->con->set_priv(nullptr);
 
   if (is_shutdown())
     return false;
@@ -4869,7 +4968,6 @@ bool Monitor::ms_handle_reset(Connection *con)
     Mutex::Locker l(session_map_lock);
     remove_session(s);
   }
-  s->put();
   return true;
 }
 
@@ -4923,7 +5021,7 @@ int Monitor::load_metadata()
   int r = store->get(MONITOR_STORE_PREFIX, "last_metadata", bl);
   if (r)
     return r;
-  bufferlist::iterator it = bl.begin();
+  auto it = bl.cbegin();
   decode(mon_metadata, it);
 
   pending_metadata = mon_metadata;
@@ -4969,7 +5067,7 @@ void Monitor::count_metadata(const string& field, Formatter *f)
 
 int Monitor::print_nodes(Formatter *f, ostream& err)
 {
-  map<string, list<int> > mons;	// hostname => mon
+  map<string, list<string> > mons;	// hostname => mon
   for (map<int, Metadata>::iterator it = mon_metadata.begin();
        it != mon_metadata.end(); ++it) {
     const Metadata& m = it->second;
@@ -4978,7 +5076,7 @@ int Monitor::print_nodes(Formatter *f, ostream& err)
       // not likely though
       continue;
     }
-    mons[hostname->second].push_back(it->first);
+    mons[hostname->second].push_back(monmap->get_name(it->first));
   }
 
   dump_services(f, mons, "mon");
@@ -5028,7 +5126,7 @@ int Monitor::scrub()
     MMonScrub *r = new MMonScrub(MMonScrub::OP_SCRUB, scrub_version,
                                  num_keys);
     r->key = scrub_state->last_key;
-    messenger->send_message(r, monmap->get_inst(*p));
+    send_mon_message(r, *p);
   }
 
   // scrub my keys
@@ -5388,7 +5486,41 @@ void Monitor::tick()
     paxos->trigger_propose();
   }
 
+  mgr_client.update_daemon_health(get_health_metrics());
   new_tick();
+}
+
+vector<DaemonHealthMetric> Monitor::get_health_metrics() 
+{
+  vector<DaemonHealthMetric> metrics;
+
+  utime_t oldest_secs;
+  const utime_t now = ceph_clock_now();
+  auto too_old = now;
+  too_old -= g_conf->get_val<std::chrono::seconds>("mon_op_complaint_time").count();
+  int slow = 0;
+  TrackedOpRef oldest_op;
+  auto count_slow_ops = [&](TrackedOp& op) {
+    if (op.get_initiated() < too_old) {
+      slow++;
+      if (!oldest_op || op.get_initiated() < oldest_op->get_initiated()) {
+	oldest_op = &op;
+      }
+      return true;
+    } else {
+      return false;
+    }
+  };
+  if (op_tracker.visit_ops_in_flight(&oldest_secs, count_slow_ops)) {
+    if (slow) {
+      derr << __func__ << " reporting " << slow << " slow ops, oldest is "
+	   << oldest_op->get_desc() << dendl;
+    }
+    metrics.emplace_back(daemon_metric::SLOW_OPS, slow, oldest_secs);
+  } else {
+    metrics.emplace_back(daemon_metric::SLOW_OPS, 0, 0);
+  }
+  return metrics;
 }
 
 void Monitor::prepare_new_fingerprint(MonitorDBStore::TransactionRef t)
@@ -5509,7 +5641,7 @@ int Monitor::mkfs(bufferlist& osdmapbl)
 	bufferlist bl;
 	bl.append(keyring_plaintext);
 	try {
-	  bufferlist::iterator i = bl.begin();
+	  auto i = bl.cbegin();
 	  keyring.decode_plaintext(i);
 	}
 	catch (const buffer::error& e) {
@@ -5656,7 +5788,7 @@ bool Monitor::ms_get_authorizer(int service_id, AuthAuthorizer **authorizer,
   bufferlist ticket_data;
   encode(blob, ticket_data);
 
-  bufferlist::iterator iter = ticket_data.begin();
+  auto iter = ticket_data.cbegin();
   CephXTicketHandler handler(g_ceph_context, service_id);
   decode(handler.ticket, iter);
 
@@ -5684,7 +5816,7 @@ bool Monitor::ms_verify_authorizer(Connection *con, int peer_type,
     // monitor, and cephx is enabled
     isvalid = false;
     if (protocol == CEPH_AUTH_CEPHX) {
-      bufferlist::iterator iter = authorizer_data.begin();
+      auto iter = authorizer_data.cbegin();
       CephXServiceTicketInfo auth_ticket_info;
       
       if (authorizer_data.length()) {

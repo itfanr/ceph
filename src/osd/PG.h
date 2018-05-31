@@ -58,6 +58,8 @@
 
 class OSD;
 class OSDService;
+class OSDShard;
+class OSDShardPGSlot;
 class MOSDOp;
 class MOSDPGScan;
 class MOSDPGBackfill;
@@ -257,7 +259,7 @@ public:
   class RecoveryCtx;
 
   // -- methods --
-  std::string gen_prefix() const override;
+  std::ostream& gen_prefix(std::ostream& out) const override;
   CephContext *get_cct() const override {
     return cct;
   }
@@ -269,6 +271,9 @@ public:
     assert(is_locked());
     assert(osdmap_ref);
     return osdmap_ref;
+  }
+  epoch_t get_osdmap_epoch() const {
+    return osdmap_ref->get_epoch();
   }
 
   void lock_suspend_timeout(ThreadPool::TPHandle &handle) {
@@ -418,11 +423,8 @@ public:
     vector<int>& newacting, int acting_primary,
     RecoveryCtx *rctx);
   void handle_activate_map(RecoveryCtx *rctx);
-  void handle_create(RecoveryCtx *rctx);
-  void handle_loaded(RecoveryCtx *rctx);
+  void handle_initialize(RecoveryCtx *rctx);
   void handle_query_state(Formatter *f);
-
-  void handle_pg_trim(epoch_t epoch, int from, shard_id_t shard, eversion_t trim_to);
 
   /**
    * @param ops_begun returns how many recovery ops the function started
@@ -444,7 +446,8 @@ public:
   void get_pg_stats(std::function<void(const pg_stat_t&, epoch_t lec)> f);
   void with_heartbeat_peers(std::function<void(int)> f);
 
-  virtual void shutdown() = 0;
+  void shutdown();
+  virtual void on_shutdown() = 0;
 
   bool get_must_scrub() const {
     return scrubber.must_scrub;
@@ -474,7 +477,7 @@ public:
 
   virtual void on_removal(ObjectStore::Transaction *t) = 0;
 
-  void _delete_some();
+  void _delete_some(ObjectStore::Transaction *t);
 
   // reference counting
 #ifdef PG_DEBUG_REFS
@@ -487,7 +490,6 @@ public:
   int get_num_ref() {
     return ref;
   }
-
 
   // ctor
   PG(OSDService *o, OSDMapRef curmap,
@@ -502,6 +504,10 @@ protected:
   // -------------
   // protected
   OSDService *osd;
+public:
+  OSDShard *osd_shard = nullptr;
+  OSDShardPGSlot *pg_slot = nullptr;
+protected:
   CephContext *cct;
 
   // osdmap
@@ -555,7 +561,7 @@ protected:
     return get_pgbackend()->get_is_recoverable_predicate();
   }
 protected:
-  OSDMapRef last_persisted_osdmap_ref;
+  epoch_t last_persisted_osdmap;
 
   void requeue_map_waiters();
 
@@ -568,7 +574,7 @@ protected:
 
 
   bool deleting;  // true while in removing or OSD is shutting down
-  bool deleted = false;
+  atomic<bool> deleted = {false};
 
   ZTracer::Endpoint trace_endpoint;
 
@@ -697,7 +703,9 @@ protected:
       is_readable.reset(_is_readable);
       is_recoverable.reset(_is_recoverable);
     }
-    string gen_prefix() const { return pg->gen_prefix(); }
+    std::ostream& gen_prefix(std::ostream& out) const {
+      return pg->gen_prefix(out);
+    }
     bool needs_recovery(
       const hobject_t &hoid,
       eversion_t *v = 0) const {
@@ -972,9 +980,6 @@ public:
     map<int, map<spg_t, pg_query_t> > *query_map;
     map<int, vector<pair<pg_notify_t, PastIntervals> > > *info_map;
     map<int, vector<pair<pg_notify_t, PastIntervals> > > *notify_list;
-    set<PGRef> created_pgs;
-    C_Contexts *on_applied;
-    C_Contexts *on_safe;
     ObjectStore::Transaction *transaction;
     ThreadPool::TPHandle* handle;
     RecoveryCtx(map<int, map<spg_t, pg_query_t> > *query_map,
@@ -982,13 +987,9 @@ public:
 		    vector<pair<pg_notify_t, PastIntervals> > > *info_map,
 		map<int,
 		    vector<pair<pg_notify_t, PastIntervals> > > *notify_list,
-		C_Contexts *on_applied,
-		C_Contexts *on_safe,
 		ObjectStore::Transaction *transaction)
       : query_map(query_map), info_map(info_map), 
 	notify_list(notify_list),
-	on_applied(on_applied),
-	on_safe(on_safe),
 	transaction(transaction),
         handle(NULL) {}
 
@@ -996,8 +997,6 @@ public:
       : query_map(&(buf.query_map)),
 	info_map(&(buf.info_map)),
 	notify_list(&(buf.notify_list)),
-	on_applied(rctx.on_applied),
-	on_safe(rctx.on_safe),
 	transaction(rctx.transaction),
         handle(rctx.handle) {}
 
@@ -1465,7 +1464,6 @@ protected:
   void activate(
     ObjectStore::Transaction& t,
     epoch_t activation_epoch,
-    list<Context*>& tfin,
     map<int, map<spg_t,pg_query_t> >& query_map,
     map<int,
       vector<pair<pg_notify_t, PastIntervals> > > *activator_map,
@@ -1501,7 +1499,7 @@ protected:
 
   Context *finish_sync_event;
 
-  void finish_recovery(list<Context*>& tfin);
+  Context *finish_recovery();
   void _finish_recovery(Context *c);
   struct C_PG_FinishRecovery : public Context {
     PGRef pg;
@@ -1595,11 +1593,36 @@ public:
     // Cleaned map pending snap metadata scrub
     ScrubMap cleaned_meta_map;
 
+    void clean_meta_map(ScrubMap &for_meta_scrub) {
+      if (end.is_max() ||
+          cleaned_meta_map.objects.empty()) {
+         cleaned_meta_map.swap(for_meta_scrub);
+      } else {
+        auto iter = cleaned_meta_map.objects.end();
+        --iter; // not empty, see if clause
+        auto begin = cleaned_meta_map.objects.begin();
+        if (iter->first.has_snapset()) {
+          ++iter;
+        } else {
+          while (iter != begin) {
+            auto next = iter--;
+            if (next->first.get_head() != iter->first.get_head()) {
+	      ++iter;
+	      break;
+            }
+          }
+        }
+        for_meta_scrub.objects.insert(begin, iter);
+        cleaned_meta_map.objects.erase(begin, iter);
+      }
+    }
+
     // digest updates which we are waiting on
     int num_digest_updates_pending;
 
     // chunky scrub
     hobject_t start, end;    // [start,end)
+    hobject_t max_end;       // Largest end that may have been sent to replicas
     eversion_t subset_last_update;
 
     // chunky scrub state
@@ -1675,6 +1698,7 @@ public:
       state = PG::Scrubber::INACTIVE;
       start = hobject_t();
       end = hobject_t();
+      max_end = hobject_t();
       subset_last_update = eversion_t();
       shallow_errors = 0;
       deep_errors = 0;
@@ -1713,6 +1737,9 @@ protected:
   // not stop until the scrub range is completed.
   bool write_blocked_by_scrub(const hobject_t &soid);
 
+  /// true if the given range intersects the scrub interval in any way
+  bool range_intersects_scrub(const hobject_t &start, const hobject_t& end);
+
   void repair_object(
     const hobject_t& soid, list<pair<ScrubMap::object, pg_shard_t> > *ok_peers,
     pg_shard_t bad_peer);
@@ -1728,9 +1755,7 @@ protected:
   void scrub_clear_state();
   void _scan_snaps(ScrubMap &map);
   void _repair_oinfo_oid(ScrubMap &map);
-  void _scan_rollback_obs(
-    const vector<ghobject_t> &rollback_obs,
-    ThreadPool::TPHandle &handle);
+  void _scan_rollback_obs(const vector<ghobject_t> &rollback_obs);
   void _request_scrub_map(pg_shard_t replica, eversion_t version,
                           hobject_t start, hobject_t end, bool deep,
 			  bool allow_preemption);
@@ -1793,8 +1818,6 @@ protected:
   };
 
 
-  list<PGPeeringEventRef> peering_waiters;
-
   struct QueryState : boost::statechart::event< QueryState > {
     Formatter *f;
     explicit QueryState(Formatter *f) : f(f) {}
@@ -1804,49 +1827,6 @@ protected:
   };
 
 public:
-  struct MInfoRec : boost::statechart::event< MInfoRec > {
-    pg_shard_t from;
-    pg_info_t info;
-    epoch_t msg_epoch;
-    MInfoRec(pg_shard_t from, const pg_info_t &info, epoch_t msg_epoch) :
-      from(from), info(info), msg_epoch(msg_epoch) {}
-    void print(std::ostream *out) const {
-      *out << "MInfoRec from " << from << " info: " << info;
-    }
-  };
-  struct MLogRec : boost::statechart::event< MLogRec > {
-    pg_shard_t from;
-    boost::intrusive_ptr<MOSDPGLog> msg;
-    MLogRec(pg_shard_t from, MOSDPGLog *msg) :
-      from(from), msg(msg) {}
-    void print(std::ostream *out) const {
-      *out << "MLogRec from " << from;
-    }
-  };
-
-  struct MNotifyRec : boost::statechart::event< MNotifyRec > {
-    pg_shard_t from;
-    pg_notify_t notify;
-    uint64_t features;
-    MNotifyRec(pg_shard_t from, const pg_notify_t &notify, uint64_t f) :
-      from(from), notify(notify), features(f) {}
-    void print(std::ostream *out) const {
-      *out << "MNotifyRec from " << from << " notify: " << notify
-        << " features: 0x" << hex << features << dec;
-    }
-  };
-  struct MQuery : boost::statechart::event< MQuery > {
-    pg_shard_t from;
-    pg_query_t query;
-    epoch_t query_epoch;
-    MQuery(pg_shard_t from, const pg_query_t &query, epoch_t query_epoch):
-      from(from), query(query), query_epoch(query_epoch) {}
-    void print(std::ostream *out) const {
-      *out << "MQuery from " << from
-	   << " query_epoch " << query_epoch
-	   << " query: " << query;
-    }
-  };
 protected:
 
   struct AdvMap : boost::statechart::event< AdvMap > {
@@ -1883,44 +1863,6 @@ protected:
     }
   };
 public:
-  struct RequestBackfillPrio : boost::statechart::event< RequestBackfillPrio > {
-    unsigned priority;
-    explicit RequestBackfillPrio(unsigned prio) :
-              boost::statechart::event< RequestBackfillPrio >(),
-			  priority(prio) {}
-    void print(std::ostream *out) const {
-      *out << "RequestBackfillPrio: priority " << priority;
-    }
-  };
-  struct RequestRecoveryPrio : boost::statechart::event< RequestRecoveryPrio > {
-    unsigned priority;
-    explicit RequestRecoveryPrio(unsigned prio) :
-              boost::statechart::event< RequestRecoveryPrio >(),
-			  priority(prio) {}
-    void print(std::ostream *out) const {
-      *out << "RequestRecoveryPrio: priority " << priority;
-    }
-  };
-#define TrivialEvent(T) struct T : boost::statechart::event< T > { \
-    T() : boost::statechart::event< T >() {}			   \
-    void print(std::ostream *out) const {			   \
-      *out << #T;						   \
-    }								   \
-  };
-  struct DeferBackfill : boost::statechart::event<DeferBackfill> {
-    float delay;
-    explicit DeferBackfill(float delay) : delay(delay) {}
-    void print(std::ostream *out) const {
-      *out << "DeferBackfill: delay " << delay;
-    }
-  };
-  struct DeferRecovery : boost::statechart::event<DeferRecovery> {
-    float delay;
-    explicit DeferRecovery(float delay) : delay(delay) {}
-    void print(std::ostream *out) const {
-      *out << "DeferRecovery: delay " << delay;
-    }
-  };
   struct UnfoundBackfill : boost::statechart::event<UnfoundBackfill> {
     explicit UnfoundBackfill() {}
     void print(std::ostream *out) const {
@@ -1933,27 +1875,26 @@ public:
       *out << "UnfoundRecovery";
     }
   };
+
+  struct RequestScrub : boost::statechart::event<RequestScrub> {
+    bool deep;
+    bool repair;
+    explicit RequestScrub(bool d, bool r) : deep(d), repair(r) {}
+    void print(std::ostream *out) const {
+      *out << "RequestScrub(" << (deep ? "deep" : "shallow")
+	   << (repair ? " repair" : "");
+    }
+  };
+
 protected:
   TrivialEvent(Initialize)
-  TrivialEvent(Load)
   TrivialEvent(GotInfo)
   TrivialEvent(NeedUpThru)
-  public:
-  TrivialEvent(NullEvt)
-  protected:
   TrivialEvent(Backfilled)
   TrivialEvent(LocalBackfillReserved)
-  public:
-  TrivialEvent(RemoteBackfillReserved)
-  protected:
   TrivialEvent(RejectRemoteReservation)
   public:
-  TrivialEvent(RemoteReservationRejected)
-  TrivialEvent(RemoteReservationRevokedTooFull)
-  TrivialEvent(RemoteReservationRevoked)
-  TrivialEvent(RemoteReservationCanceled)
   TrivialEvent(RequestBackfill)
-  TrivialEvent(RecoveryDone)
   protected:
   TrivialEvent(RemoteRecoveryPreempted)
   TrivialEvent(RemoteBackfillPreempted)
@@ -1970,7 +1911,6 @@ protected:
   TrivialEvent(DoRecovery)
   TrivialEvent(LocalRecoveryReserved)
   public:
-  TrivialEvent(RemoteRecoveryReserved)
   protected:
   TrivialEvent(AllRemotesReserved)
   TrivialEvent(AllBackfillsReserved)
@@ -1983,6 +1923,12 @@ protected:
   public:
   TrivialEvent(DeleteStart)
   TrivialEvent(DeleteSome)
+
+  TrivialEvent(SetForceRecovery)
+  TrivialEvent(UnsetForceRecovery)
+  TrivialEvent(SetForceBackfill)
+  TrivialEvent(UnsetForceBackfill)
+
   protected:
   TrivialEvent(DeleteReserved)
   TrivialEvent(DeleteInterrupted)
@@ -2041,18 +1987,6 @@ protected:
 	assert(state->rctx);
 	assert(state->rctx->info_map);
 	return state->rctx->info_map;
-      }
-
-      list< Context* > *get_on_safe_context_list() {
-	assert(state->rctx);
-	assert(state->rctx->on_safe);
-	return &(state->rctx->on_safe->contexts);
-      }
-
-      list< Context * > *get_on_applied_context_list() {
-	assert(state->rctx);
-	assert(state->rctx->on_applied);
-	return &(state->rctx->on_applied->contexts);
       }
 
       RecoveryCtx *get_recovery_ctx() { return &*(state->rctx); }
@@ -2114,12 +2048,10 @@ protected:
 
       typedef boost::mpl::list <
 	boost::statechart::transition< Initialize, Reset >,
-	boost::statechart::custom_reaction< Load >,
 	boost::statechart::custom_reaction< NullEvt >,
 	boost::statechart::transition< boost::statechart::event_base, Crashed >
 	> reactions;
 
-      boost::statechart::result react(const Load&);
       boost::statechart::result react(const MNotifyRec&);
       boost::statechart::result react(const MInfoRec&);
       boost::statechart::result react(const MLogRec&);
@@ -2158,8 +2090,15 @@ protected:
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< QueryState >,
 	boost::statechart::custom_reaction< AdvMap >,
-	boost::statechart::custom_reaction< NullEvt >,
 	boost::statechart::custom_reaction< IntervalFlush >,
+	// ignored
+	boost::statechart::custom_reaction< NullEvt >,
+	boost::statechart::custom_reaction<SetForceRecovery>,
+	boost::statechart::custom_reaction<UnsetForceRecovery>,
+	boost::statechart::custom_reaction<SetForceBackfill>,
+	boost::statechart::custom_reaction<UnsetForceBackfill>,
+	boost::statechart::custom_reaction<RequestScrub>,
+	// crash
 	boost::statechart::transition< boost::statechart::event_base, Crashed >
 	> reactions;
       boost::statechart::result react(const QueryState& q);
@@ -2195,10 +2134,20 @@ protected:
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< ActMap >,
 	boost::statechart::custom_reaction< MNotifyRec >,
-	boost::statechart::transition< NeedActingChange, WaitActingChange >
+	boost::statechart::transition< NeedActingChange, WaitActingChange >,
+	boost::statechart::custom_reaction<SetForceRecovery>,
+	boost::statechart::custom_reaction<UnsetForceRecovery>,
+	boost::statechart::custom_reaction<SetForceBackfill>,
+	boost::statechart::custom_reaction<UnsetForceBackfill>,
+	boost::statechart::custom_reaction<RequestScrub>
 	> reactions;
       boost::statechart::result react(const ActMap&);
       boost::statechart::result react(const MNotifyRec&);
+      boost::statechart::result react(const SetForceRecovery&);
+      boost::statechart::result react(const UnsetForceRecovery&);
+      boost::statechart::result react(const SetForceBackfill&);
+      boost::statechart::result react(const UnsetForceBackfill&);
+      boost::statechart::result react(const RequestScrub&);
     };
 
     struct WaitActingChange : boost::statechart::state< WaitActingChange, Primary>,
@@ -2255,6 +2204,7 @@ protected:
 	boost::statechart::custom_reaction< MInfoRec >,
 	boost::statechart::custom_reaction< MNotifyRec >,
 	boost::statechart::custom_reaction< MLogRec >,
+	boost::statechart::custom_reaction< MTrim >,
 	boost::statechart::custom_reaction< Backfilled >,
 	boost::statechart::custom_reaction< AllReplicasActivated >,
 	boost::statechart::custom_reaction< DeferRecovery >,
@@ -2271,6 +2221,7 @@ protected:
       boost::statechart::result react(const MInfoRec& infoevt);
       boost::statechart::result react(const MNotifyRec& notevt);
       boost::statechart::result react(const MLogRec& logevt);
+      boost::statechart::result react(const MTrim& trimevt);
       boost::statechart::result react(const Backfilled&) {
 	return discard_event();
       }
@@ -2300,10 +2251,15 @@ protected:
 
     struct Clean : boost::statechart::state< Clean, Active >, NamedState {
       typedef boost::mpl::list<
-	boost::statechart::transition< DoRecovery, WaitLocalRecoveryReserved >
+	boost::statechart::transition< DoRecovery, WaitLocalRecoveryReserved >,
+	boost::statechart::custom_reaction<SetForceRecovery>,
+	boost::statechart::custom_reaction<SetForceBackfill>
       > reactions;
       explicit Clean(my_context ctx);
       void exit();
+      boost::statechart::result react(const boost::statechart::event_base&) {
+	return discard_event();
+      }
     };
 
     struct Recovered : boost::statechart::state< Recovered, Active >, NamedState {
@@ -2322,7 +2278,7 @@ protected:
 
     struct Backfilling : boost::statechart::state< Backfilling, Active >, NamedState {
       typedef boost::mpl::list<
-	boost::statechart::transition< Backfilled, Recovered >,
+        boost::statechart::custom_reaction< Backfilled >,
 	boost::statechart::custom_reaction< DeferBackfill >,
 	boost::statechart::custom_reaction< UnfoundBackfill >,
 	boost::statechart::custom_reaction< RemoteReservationRejected >,
@@ -2335,6 +2291,8 @@ protected:
 	post_event(RemoteReservationRevokedTooFull());
 	return discard_event();
       }
+      void backfill_release_reservations();
+      boost::statechart::result react(const Backfilled& evt);
       boost::statechart::result react(const RemoteReservationRevokedTooFull& evt);
       boost::statechart::result react(const RemoteReservationRevoked& evt);
       boost::statechart::result react(const DeferBackfill& evt);
@@ -2409,6 +2367,7 @@ protected:
 	boost::statechart::custom_reaction< MQuery >,
 	boost::statechart::custom_reaction< MInfoRec >,
 	boost::statechart::custom_reaction< MLogRec >,
+	boost::statechart::custom_reaction< MTrim >,
 	boost::statechart::custom_reaction< Activate >,
 	boost::statechart::custom_reaction< DeferRecovery >,
 	boost::statechart::custom_reaction< DeferBackfill >,
@@ -2416,14 +2375,19 @@ protected:
 	boost::statechart::custom_reaction< UnfoundBackfill >,
 	boost::statechart::custom_reaction< RemoteBackfillPreempted >,
 	boost::statechart::custom_reaction< RemoteRecoveryPreempted >,
+	boost::statechart::custom_reaction< RecoveryDone >,
 	boost::statechart::transition<DeleteStart, ToDelete>
 	> reactions;
       boost::statechart::result react(const QueryState& q);
       boost::statechart::result react(const MInfoRec& infoevt);
       boost::statechart::result react(const MLogRec& logevt);
+      boost::statechart::result react(const MTrim& trimevt);
       boost::statechart::result react(const ActMap&);
       boost::statechart::result react(const MQuery&);
       boost::statechart::result react(const Activate&);
+      boost::statechart::result react(const RecoveryDone&) {
+	return discard_event();
+      }
       boost::statechart::result react(const DeferRecovery& evt) {
 	return discard_event();
       }
@@ -2466,7 +2430,8 @@ protected:
 	boost::statechart::custom_reaction< RemoteBackfillReserved >,
 	boost::statechart::custom_reaction< RejectRemoteReservation >,
 	boost::statechart::custom_reaction< RemoteReservationRejected >,
-	boost::statechart::custom_reaction< RemoteReservationCanceled >
+	boost::statechart::custom_reaction< RemoteReservationCanceled >,
+	boost::statechart::custom_reaction< RecoveryDone >
 	> reactions;
       explicit RepWaitBackfillReserved(my_context ctx);
       void exit();
@@ -2474,6 +2439,7 @@ protected:
       boost::statechart::result react(const RejectRemoteReservation &evt);
       boost::statechart::result react(const RemoteReservationRejected &evt);
       boost::statechart::result react(const RemoteReservationCanceled &evt);
+      boost::statechart::result react(const RecoveryDone&);
     };
 
     struct RepWaitRecoveryReserved : boost::statechart::state< RepWaitRecoveryReserved, ReplicaActive >, NamedState {
@@ -2703,9 +2669,11 @@ protected:
     struct Down : boost::statechart::state< Down, Peering>, NamedState {
       explicit Down(my_context ctx);
       typedef boost::mpl::list <
-	boost::statechart::custom_reaction< QueryState >
+	boost::statechart::custom_reaction< QueryState >,
+	boost::statechart::custom_reaction< MNotifyRec >
 	> reactions;
-      boost::statechart::result react(const QueryState& infoevt);
+      boost::statechart::result react(const QueryState& q);
+      boost::statechart::result react(const MNotifyRec& infoevt);
       void exit();
     };
 
@@ -2718,7 +2686,7 @@ protected:
       explicit Incomplete(my_context ctx);
       boost::statechart::result react(const AdvMap &advmap);
       boost::statechart::result react(const MNotifyRec& infoevt);
-      boost::statechart::result react(const QueryState& infoevt);
+      boost::statechart::result react(const QueryState& q);
       void exit();
     };
 
@@ -2873,7 +2841,6 @@ protected:
   void prepare_write_info(map<string,bufferlist> *km);
 
   void update_store_with_options();
-  void update_store_on_load();
 
 public:
   static int _prepare_write_info(
@@ -2962,9 +2929,7 @@ protected:
     ObjectStore::Transaction *t);
   void on_new_interval();
   virtual void _on_new_interval() = 0;
-  void start_flush(ObjectStore::Transaction *t,
-		   list<Context *> *on_applied,
-		   list<Context *> *on_safe);
+  void start_flush(ObjectStore::Transaction *t);
   void set_last_peering_reset();
 
   void update_history(const pg_history_t& history);

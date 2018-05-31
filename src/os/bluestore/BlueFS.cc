@@ -164,7 +164,7 @@ int BlueFS::add_block_device(unsigned id, const string& path, bool trim)
   }
 
   dout(1) << __func__ << " bdev " << id << " path " << path
-	  << " size " << pretty_si_t(b->get_size()) << "B" << dendl;
+	  << " size " << byte_u_t(b->get_size()) << dendl;
   bdev[id] = b;
   ioc[id] = new IOContext(cct, NULL);
   return 0;
@@ -215,19 +215,15 @@ int BlueFS::reclaim_blocks(unsigned id, uint64_t want,
           << " want 0x" << std::hex << want << std::dec << dendl;
   assert(id < alloc.size());
   assert(alloc[id]);
-  int r = alloc[id]->reserve(want);
-  assert(r == 0); // caller shouldn't ask for more than they can get
+
   int64_t got = alloc[id]->allocate(want, cct->_conf->bluefs_alloc_size, 0,
 				    extents);
   assert(got != 0);
-  if (got < (int64_t)want) {
-    alloc[id]->unreserve(want - std::max<int64_t>(0, got));
-    if (got < 0) {
-      derr << __func__ << " failed to allocate space to return to bluestore"
-	<< dendl;
-      alloc[id]->dump();
-      return got;
-    }
+  if (got < 0) {
+    derr << __func__ << " failed to allocate space to return to bluestore"
+      << dendl;
+    alloc[id]->dump();
+    return got;
   }
 
   for (auto& p : *extents) {
@@ -236,7 +232,7 @@ int BlueFS::reclaim_blocks(unsigned id, uint64_t want,
   }
 
   flush_bdev();
-  r = _flush_and_sync_log(l);
+  int r = _flush_and_sync_log(l);
   assert(r == 0);
 
   logger->inc(l_bluefs_reclaim_bytes, got);
@@ -309,9 +305,9 @@ void BlueFS::get_usage(vector<pair<uint64_t,uint64_t>> *usage)
       (block_all[id].size() - (*usage)[id].first) * 100 / block_all[id].size();
     dout(10) << __func__ << " bdev " << id
 	     << " free " << (*usage)[id].first
-	     << " (" << pretty_si_t((*usage)[id].first) << "B)"
+	     << " (" << byte_u_t((*usage)[id].first) << ")"
 	     << " / " << (*usage)[id].second
-	     << " (" << pretty_si_t((*usage)[id].second) << "B)"
+	     << " (" << byte_u_t((*usage)[id].second) << ")"
 	     << ", used " << used << "%"
 	     << dendl;
   }
@@ -545,7 +541,7 @@ int BlueFS::_open_super()
   if (r < 0)
     return r;
 
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   decode(super, p);
   {
     bufferlist t;
@@ -601,7 +597,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
     uint64_t seq;
     uuid_d uuid;
     {
-      bufferlist::iterator p = bl.begin();
+      auto p = bl.cbegin();
       __u8 a, b;
       uint32_t len;
       decode(a, p);
@@ -642,7 +638,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
     }
     bluefs_transaction_t t;
     try {
-      bufferlist::iterator p = bl.begin();
+      auto p = bl.cbegin();
       decode(t, p);
     }
     catch (buffer::error& e) {
@@ -660,7 +656,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
                 << ": " << t << std::endl;
     }
 
-    bufferlist::iterator p = t.op_bl.begin();
+    auto p = t.op_bl.cbegin();
     while (!p.end()) {
       __u8 op;
       decode(op, p);
@@ -1039,7 +1035,7 @@ int BlueFS::_read_random(
   while (len > 0) {
     uint64_t x_off = 0;
     auto p = h->file->fnode.seek(off, &x_off);
-    uint64_t l = std::min(p->length - x_off, len);
+    uint64_t l = std::min(p->length - x_off, static_cast<uint64_t>(len));
     dout(20) << __func__ << " read buffered 0x"
              << std::hex << x_off << "~" << l << std::dec
              << " of " << *p << dendl;
@@ -1798,6 +1794,7 @@ int BlueFS::_flush_range(FileWriter *h, uint64_t offset, uint64_t length)
     } else {
       bdev[p->bdev]->aio_write(p->offset + x_off, t, h->iocv[p->bdev], buffered);
     }
+    h->dirty_devs[p->bdev] = true;
     bloff += x_len;
     length -= x_len;
     ++p;
@@ -1932,6 +1929,8 @@ int BlueFS::_fsync(FileWriter *h, std::unique_lock<std::mutex>& l)
 
 void BlueFS::_flush_bdev_safely(FileWriter *h)
 {
+  std::array<bool, MAX_BDEV> flush_devs = h->dirty_devs;
+  h->dirty_devs.fill(false);
 #ifdef HAVE_LIBAIO
   if (!cct->_conf->bluefs_sync_write) {
     list<aio_t> completed_ios;
@@ -1939,14 +1938,24 @@ void BlueFS::_flush_bdev_safely(FileWriter *h)
     lock.unlock();
     wait_for_aio(h);
     completed_ios.clear();
-    flush_bdev();
+    flush_bdev(flush_devs);
     lock.lock();
   } else
 #endif
   {
     lock.unlock();
-    flush_bdev();
+    flush_bdev(flush_devs);
     lock.lock();
+  }
+}
+
+void BlueFS::flush_bdev(std::array<bool, MAX_BDEV>& dirty_bdevs)
+{
+  // NOTE: this is safe to call without a lock.
+  dout(20) << __func__ << dendl;
+  for (unsigned i = 0; i < MAX_BDEV; i++) {
+    if (dirty_bdevs[i])
+      bdev[i]->flush();
   }
 }
 
@@ -1969,15 +1978,10 @@ int BlueFS::_allocate(uint8_t id, uint64_t len,
   uint64_t min_alloc_size = cct->_conf->bluefs_alloc_size;
 
   uint64_t left = round_up_to(len, min_alloc_size);
-  int r = -ENOSPC;
   int64_t alloc_len = 0;
   PExtentVector extents;
   
   if (alloc[id]) {
-    r = alloc[id]->reserve(left);
-  }
-  
-  if (r == 0) {
     uint64_t hint = 0;
     if (!node->extents.empty() && node->extents.back().bdev == id) {
       hint = node->extents.back().end();
@@ -1985,14 +1989,9 @@ int BlueFS::_allocate(uint8_t id, uint64_t len,
     extents.reserve(4);  // 4 should be (more than) enough for most allocations
     alloc_len = alloc[id]->allocate(left, min_alloc_size, hint, &extents);
   }
-  if (r < 0 || (alloc_len < (int64_t)left)) {
-    if (r == 0) {
-      interval_set<uint64_t> to_release;
-      alloc[id]->unreserve(left - alloc_len);
-      for (auto& p : extents) {
-        to_release.insert(p.offset, p.length);
-      }
-      alloc[id]->release(to_release);
+  if (alloc_len < (int64_t)left) {
+    if (alloc_len != 0) {
+      alloc[id]->release(extents);
     }
     if (id != BDEV_SLOW) {
       if (bdev[id]) {
@@ -2165,8 +2164,6 @@ BlueFS::FileWriter *BlueFS::_create_writer(FileRef f)
   for (unsigned i = 0; i < MAX_BDEV; ++i) {
     if (bdev[i]) {
       w->iocv[i] = new IOContext(cct, NULL);
-    } else {
-      w->iocv[i] = NULL;
     }
   }
   return w;

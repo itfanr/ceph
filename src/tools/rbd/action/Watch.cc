@@ -20,7 +20,7 @@ namespace po = boost::program_options;
 class RbdWatchCtx : public librados::WatchCtx2 {
 public:
   RbdWatchCtx(librados::IoCtx& io_ctx, const char *image_name,
-              std::string header_oid)
+              const std::string &header_oid)
     : m_io_ctx(io_ctx), m_image_name(image_name), m_header_oid(header_oid)
   {
   }
@@ -37,7 +37,7 @@ public:
       notify_message = NotifyMessage(HeaderUpdatePayload());
     } else {
       try {
-        bufferlist::iterator iter = bl.begin();
+        auto iter = bl.cbegin();
         notify_message.decode(iter);
       } catch (const buffer::error &err) {
         std::cerr << "rbd: failed to decode image notification" << std::endl;

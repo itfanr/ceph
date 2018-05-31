@@ -63,7 +63,7 @@ struct Mapping {
     encode(hoid, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator &bl) {
+  void decode(bufferlist::const_iterator &bl) {
     DECODE_START(1, bl);
     decode(snap, bl);
     decode(hoid, bl);
@@ -103,7 +103,7 @@ pair<snapid_t, hobject_t> SnapMapper::from_raw(
 {
   Mapping map;
   bufferlist bl(image.second);
-  bufferlist::iterator bp(bl.begin());
+  auto bp = bl.cbegin();
   decode(map, bp);
   return make_pair(map.snap, map.hoid);
 }
@@ -126,12 +126,23 @@ void SnapMapper::object_snaps::encode(bufferlist &bl) const
   ENCODE_FINISH(bl);
 }
 
-void SnapMapper::object_snaps::decode(bufferlist::iterator &bl)
+void SnapMapper::object_snaps::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START(1, bl);
   decode(oid, bl);
   decode(snaps, bl);
   DECODE_FINISH(bl);
+}
+
+bool SnapMapper::check(const hobject_t &hoid) const
+{
+  if (hoid.match(mask_bits, match)) {
+    return true;
+  }
+  derr << __func__ << " " << hoid << " mask_bits " << mask_bits
+       << " match 0x" << std::hex << match << std::dec << " is false"
+       << dendl;
+  return false;
 }
 
 int SnapMapper::get_snaps(
@@ -152,10 +163,13 @@ int SnapMapper::get_snaps(
     return -ENOENT;
   }
   if (out) {
-    bufferlist::iterator bp = got.begin()->second.begin();
+    auto bp = got.begin()->second.cbegin();
     decode(*out, bp);
     dout(20) << __func__ << " " << oid << " " << out->snaps << dendl;
-    assert(!out->snaps.empty());
+    if (out->snaps.empty()) {
+      dout(1) << __func__ << " " << oid << " empty snapset" << dendl;
+      assert(!cct->_conf->osd_debug_verify_snaps);
+    }
   } else {
     dout(20) << __func__ << " " << oid << " (out == NULL)" << dendl;
   }
@@ -243,11 +257,17 @@ void SnapMapper::add_oid(
   MapCacher::Transaction<std::string, bufferlist> *t)
 {
   dout(20) << __func__ << " " << oid << " " << snaps << dendl;
+  assert(!snaps.empty());
   assert(check(oid));
   {
     object_snaps out;
     int r = get_snaps(oid, &out);
-    assert(r == -ENOENT);
+    if (r != -ENOENT) {
+      derr << __func__ << " found existing snaps mapped on " << oid
+	   << ", removing" << dendl;
+      assert(!cct->_conf->osd_debug_verify_snaps);
+      remove_oid(oid, t);
+    }
   }
 
   object_snaps _snaps(oid, snaps);

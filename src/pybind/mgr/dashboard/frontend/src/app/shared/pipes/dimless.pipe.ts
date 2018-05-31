@@ -9,12 +9,15 @@ export class DimlessPipe implements PipeTransform {
 
   transform(value: any, args?: any): any {
     return this.formatter.format_number(value, 1000, [
-      ' ',
+      '',
       'k',
       'M',
       'G',
       'T',
-      'P'
+      'P',
+      'E',
+      'Z',
+      'Y'
     ]);
   }
 }

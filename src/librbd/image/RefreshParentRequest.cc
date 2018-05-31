@@ -99,7 +99,11 @@ void RefreshParentRequest<I>::send_open_parent() {
 
   librados::IoCtx parent_io_ctx;
   int r = rados.ioctx_create2(m_parent_md.spec.pool_id, parent_io_ctx);
-  assert(r == 0);
+  if (r < 0) {
+    lderr(cct) << "failed to create IoCtx: " << cpp_strerror(r) << dendl;
+    send_complete(r);
+    return;
+  }
 
   // since we don't know the image and snapshot name, set their ids and
   // reset the snap_name and snap_exists fields after we read the header
@@ -150,25 +154,11 @@ void RefreshParentRequest<I>::send_set_parent_snap() {
   CephContext *cct = m_child_image_ctx.cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
 
-  cls::rbd::SnapshotNamespace snap_namespace;
-  std::string snap_name;
-  {
-    RWLock::RLocker snap_locker(m_parent_image_ctx->snap_lock);
-    const SnapInfo *info = m_parent_image_ctx->get_snap_info(m_parent_md.spec.snap_id);
-    if (!info) {
-      lderr(cct) << "failed to locate snapshot: Snapshot with this id not found" << dendl;
-      send_complete(-ENOENT);
-      return;
-    }
-    snap_namespace = info->snap_namespace;
-    snap_name = info->name;
-  }
-
   using klass = RefreshParentRequest<I>;
   Context *ctx = create_context_callback<
     klass, &klass::handle_set_parent_snap, false>(this);
   SetSnapRequest<I> *req = SetSnapRequest<I>::create(
-    *m_parent_image_ctx, snap_namespace, snap_name, ctx);
+    *m_parent_image_ctx, m_parent_md.spec.snap_id, ctx);
   req->send();
 }
 

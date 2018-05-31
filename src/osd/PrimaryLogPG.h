@@ -27,6 +27,7 @@
 #include "common/sharedptr_registry.hpp"
 #include "ReplicatedBackend.h"
 #include "PGTransaction.h"
+#include "cls/refcount/cls_refcount_ops.h"
 
 class CopyFromCallback;
 class PromoteCallback;
@@ -299,10 +300,13 @@ public:
 			     Context *on_complete) override;
 
   template<class T> class BlessedGenContext;
+  template<class T> class UnlockedBlessedGenContext;
   class BlessedContext;
   Context *bless_context(Context *c) override;
 
   GenContext<ThreadPool::TPHandle&> *bless_gencontext(
+    GenContext<ThreadPool::TPHandle&> *c) override;
+  GenContext<ThreadPool::TPHandle&> *bless_unlocked_gencontext(
     GenContext<ThreadPool::TPHandle&> *c) override;
     
   void send_message(int to_osd, Message *m) override {
@@ -335,8 +339,10 @@ public:
     return backfill_targets;
   }
 
-  std::string gen_dbg_prefix() const override { return gen_prefix(); }
-  
+  std::ostream& gen_dbg_prefix(std::ostream& out) const override {
+    return gen_prefix(out);
+  }
+
   const map<hobject_t, set<pg_shard_t>>
     &get_missing_loc_shards() const override {
     return missing_loc.get_missing_locs();
@@ -355,7 +361,7 @@ public:
   const PGLog &get_log() const override {
     return pg_log;
   }
-  void add_local_next_event(const pg_log_entry_t& e) {
+  void add_local_next_event(const pg_log_entry_t& e) override {
     pg_log.missing_add_next_entry(e);
   }
   bool pgb_is_primary() const override {
@@ -816,7 +822,7 @@ protected:
    */
   void release_object_locks(
     ObcLockManager &lock_manager) {
-    list<pair<hobject_t, list<OpRequestRef> > > to_req;
+    list<pair<ObjectContextRef, list<OpRequestRef> > > to_req;
     bool requeue_recovery = false;
     bool requeue_snaptrim = false;
     lock_manager.put_locks(
@@ -831,7 +837,7 @@ protected:
     if (!to_req.empty()) {
       // requeue at front of scrub blocking queue if we are blocked by scrub
       for (auto &&p: to_req) {
-	if (write_blocked_by_scrub(p.first.get_head())) {
+	if (write_blocked_by_scrub(p.first->obs.oi.soid.get_head())) {
           for (auto& op : p.second) {
             op->mark_delayed("waiting for scrub");
           }
@@ -1089,7 +1095,7 @@ protected:
 				  PGBackend::RecoveryHandle *h,
 				  bool *work_started);
 
-  void finish_degraded_object(const hobject_t& oid);
+  void finish_degraded_object(const hobject_t& oid) override;
 
   // Cancels/resets pulls from peer
   void check_recovery_sources(const OSDMapRef& map) override ;
@@ -1263,7 +1269,7 @@ protected:
   // -- copyfrom --
   map<hobject_t, CopyOpRef> copy_ops;
 
-  int do_copy_get(OpContext *ctx, bufferlist::iterator& bp, OSDOp& op,
+  int do_copy_get(OpContext *ctx, bufferlist::const_iterator& bp, OSDOp& op,
 		  ObjectContextRef& obc);
   int finish_copy_get();
 
@@ -1342,9 +1348,9 @@ protected:
   int do_xattr_cmp_str(int op, string& v1s, bufferlist& xattr);
 
   // -- checksum --
-  int do_checksum(OpContext *ctx, OSDOp& osd_op, bufferlist::iterator *bl_it);
+  int do_checksum(OpContext *ctx, OSDOp& osd_op, bufferlist::const_iterator *bl_it);
   int finish_checksum(OSDOp& osd_op, Checksummer::CSumType csum_type,
-                      bufferlist::iterator *init_value_bl_it,
+                      bufferlist::const_iterator *init_value_bl_it,
                       const bufferlist &read_bl);
 
   friend class C_ChecksumRead;
@@ -1359,7 +1365,7 @@ protected:
   int do_writesame(OpContext *ctx, OSDOp& osd_op);
 
   bool pgls_filter(PGLSFilter *filter, hobject_t& sobj, bufferlist& outdata);
-  int get_pgls_filter(bufferlist::iterator& iter, PGLSFilter **pfilter);
+  int get_pgls_filter(bufferlist::const_iterator& iter, PGLSFilter **pfilter);
 
   map<hobject_t, list<OpRequestRef>> in_progress_proxy_ops;
   void kick_proxy_ops_blocked(hobject_t& soid);
@@ -1402,15 +1408,20 @@ protected:
 			     uint64_t last_offset);
   void handle_manifest_flush(hobject_t oid, ceph_tid_t tid, int r,
 			     uint64_t offset, uint64_t last_offset);
+  void refcount_manifest(ObjectContextRef obc, object_locator_t oloc, hobject_t soid,
+                         SnapContext snapc, bool get, Context *cb, uint64_t offset);
 
   friend struct C_ProxyChunkRead;
   friend class PromoteManifestCallback;
   friend class C_CopyChunk;
   friend struct C_ManifestFlush;
+  friend struct RefCountCallback;
 
 public:
   PrimaryLogPG(OSDService *o, OSDMapRef curmap,
-	       const PGPool &_pool, spg_t p);
+	       const PGPool &_pool,
+	       const map<string,string>& ec_profile,
+	       spg_t p);
   ~PrimaryLogPG() override {}
 
   int do_command(
@@ -1444,8 +1455,8 @@ public:
 
   int _get_tmap(OpContext *ctx, bufferlist *header, bufferlist *vals);
   int do_tmap2omap(OpContext *ctx, unsigned flags);
-  int do_tmapup(OpContext *ctx, bufferlist::iterator& bp, OSDOp& osd_op);
-  int do_tmapup_slow(OpContext *ctx, bufferlist::iterator& bp, OSDOp& osd_op, bufferlist& bl);
+  int do_tmapup(OpContext *ctx, bufferlist::const_iterator& bp, OSDOp& osd_op);
+  int do_tmapup_slow(OpContext *ctx, bufferlist::const_iterator& bp, OSDOp& osd_op, bufferlist& bl);
 
   void do_osd_op_effects(OpContext *ctx, const ConnectionRef& conn);
 private:
@@ -1595,8 +1606,8 @@ private:
       };
       auto *pg = context< SnapTrimmer >().pg;
       if (pg->cct->_conf->osd_snap_trim_sleep > 0) {
-	Mutex::Locker l(pg->osd->snap_sleep_lock);
-	wakeup = pg->osd->snap_sleep_timer.add_event_after(
+	Mutex::Locker l(pg->osd->sleep_lock);
+	wakeup = pg->osd->sleep_timer.add_event_after(
 	  pg->cct->_conf->osd_snap_trim_sleep,
 	  new OnTimer{pg, pg->get_osdmap()->get_epoch()});
       } else {
@@ -1607,8 +1618,8 @@ private:
       context< SnapTrimmer >().log_exit(state_name, enter_time);
       auto *pg = context< SnapTrimmer >().pg;
       if (wakeup) {
-	Mutex::Locker l(pg->osd->snap_sleep_lock);
-	pg->osd->snap_sleep_timer.cancel_event(wakeup);
+	Mutex::Locker l(pg->osd->sleep_lock);
+	pg->osd->sleep_timer.cancel_event(wakeup);
 	wakeup = nullptr;
       }
     }
@@ -1689,7 +1700,7 @@ private:
     struct ReservationCB : public Context {
       PrimaryLogPGRef pg;
       bool canceled;
-      ReservationCB(PrimaryLogPG *pg) : pg(pg), canceled(false) {}
+      explicit ReservationCB(PrimaryLogPG *pg) : pg(pg), canceled(false) {}
       void finish(int) override {
 	pg->lock();
 	if (!canceled)
@@ -1819,9 +1830,8 @@ public:
   void on_activate() override;
   void on_flushed() override;
   void on_removal(ObjectStore::Transaction *t) override;
-  void shutdown() override;
-  void on_shutdown();
-  bool check_failsafe_full(ostream &ss) override;
+  void on_shutdown() override;
+  bool check_failsafe_full() override;
   bool check_osdmap_full(const set<pg_shard_t> &missing_on) override;
   bool maybe_preempt_replica_scrub(const hobject_t& oid) override {
     return write_blocked_by_scrub(oid);

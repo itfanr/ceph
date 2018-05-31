@@ -1,23 +1,20 @@
-import { Component, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
+import { Component, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 
 import * as _ from 'lodash';
-import { Subscription } from 'rxjs/Subscription';
 
+import { CephfsService } from '../../../shared/api/cephfs.service';
 import { DimlessBinaryPipe } from '../../../shared/pipes/dimless-binary.pipe';
 import { DimlessPipe } from '../../../shared/pipes/dimless.pipe';
-import { CephfsService } from '../cephfs.service';
 
 @Component({
   selector: 'cd-cephfs',
   templateUrl: './cephfs.component.html',
   styleUrls: ['./cephfs.component.scss']
 })
-export class CephfsComponent implements OnInit, OnDestroy {
-  @ViewChild('poolProgressTmpl') poolProgressTmpl: TemplateRef<any>;
+export class CephfsComponent implements OnInit {
+  @ViewChild('poolUsageTpl') poolUsageTpl: TemplateRef<any>;
   @ViewChild('activityTmpl') activityTmpl: TemplateRef<any>;
-
-  routeParamsSubscribe: Subscription;
 
   objectValues = Object.values;
 
@@ -54,11 +51,10 @@ export class CephfsComponent implements OnInit, OnDestroy {
       columns: [
         { prop: 'pool' },
         { prop: 'type' },
-        { prop: 'used', pipe: this.dimlessBinary },
-        { prop: 'avail', pipe: this.dimlessBinary },
+        { prop: 'size', pipe: this.dimlessBinary },
         {
           name: 'Usage',
-          cellTemplate: this.poolProgressTmpl,
+          cellTemplate: this.poolUsageTpl,
           comparator: (valueA, valueB, rowA, rowB, sortDirection) => {
             const valA = rowA.used / rowA.avail;
             const valB = rowB.used / rowB.avail;
@@ -78,7 +74,7 @@ export class CephfsComponent implements OnInit, OnDestroy {
       data: []
     };
 
-    this.routeParamsSubscribe = this.route.params.subscribe((params: { id: number }) => {
+    this.route.params.subscribe((params: { id: number }) => {
       this.id = params.id;
 
       this.ranks.data = [];
@@ -88,14 +84,13 @@ export class CephfsComponent implements OnInit, OnDestroy {
     });
   }
 
-  ngOnDestroy() {
-    this.routeParamsSubscribe.unsubscribe();
-  }
-
   refresh() {
     this.cephfsService.getCephfs(this.id).subscribe((data: any) => {
       this.ranks.data = data.cephfs.ranks;
       this.pools.data = data.cephfs.pools;
+      this.pools.data.forEach((pool) => {
+        pool.size = pool.used + pool.avail;
+      });
       this.standbys = [
         {
           key: 'Standby daemons',

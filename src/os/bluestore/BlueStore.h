@@ -119,6 +119,7 @@ enum {
   l_bluestore_extent_compress,
   l_bluestore_gc_merged,
   l_bluestore_read_eio,
+  l_bluestore_fragmentation,
   l_bluestore_last
 };
 
@@ -436,7 +437,8 @@ public:
     SharedBlobRef lookup(uint64_t sbid) {
       std::lock_guard<std::mutex> l(lock);
       auto p = sb_map.find(sbid);
-      if (p == sb_map.end()) {
+      if (p == sb_map.end() ||
+	  p->second->nref == 0) {
         return nullptr;
       }
       return p->second;
@@ -448,14 +450,11 @@ public:
       sb->coll = coll;
     }
 
-    bool try_remove(SharedBlob *sb) {
+    void remove_last(SharedBlob *sb) {
       std::lock_guard<std::mutex> l(lock);
-      if (sb->nref == 0) {
-	assert(sb->get_parent() == this);
-	sb_map.erase(sb->get_sbid());
-	return true;
-      }
-      return false;
+      assert(sb->nref == 0);
+      assert(sb->get_parent() == this);
+      sb_map.erase(sb->get_sbid());
     }
 
     void remove(SharedBlob *sb) {
@@ -598,7 +597,7 @@ public:
     }
     void decode(
       Collection */*coll*/,
-      bufferptr::iterator& p,
+      bufferptr::const_iterator& p,
       bool include_ref_map) {
       const char *start = p.get_pos();
       denc(blob, p);
@@ -638,7 +637,7 @@ public:
     }
     void decode(
       Collection *coll,
-      bufferptr::iterator& p,
+      bufferptr::const_iterator& p,
       uint64_t struct_v,
       uint64_t* sbid,
       bool include_ref_map);
@@ -798,7 +797,7 @@ public:
 
     void bound_encode_spanning_blobs(size_t& p);
     void encode_spanning_blobs(bufferlist::contiguous_appender& p);
-    void decode_spanning_blobs(bufferptr::iterator& p);
+    void decode_spanning_blobs(bufferptr::const_iterator& p);
 
     BlobRef get_spanning_blob(int id) {
       auto p = spanning_blob_map.find(id);
@@ -1479,7 +1478,7 @@ public:
 	values[STATFS_COMPRESSED_ORIGINAL] == 0 &&
 	values[STATFS_COMPRESSED_ALLOCATED] == 0;
     }
-    void decode(bufferlist::iterator& it) {
+    void decode(bufferlist::const_iterator& it) {
       using ceph::decode;
       for (size_t i = 0; i < STATFS_LAST; i++) {
 	decode(values[i], it);
@@ -1592,12 +1591,16 @@ public:
     uint64_t last_nid = 0;     ///< if non-zero, highest new nid we allocated
     uint64_t last_blobid = 0;  ///< if non-zero, highest new blobid we allocated
 
-    explicit TransContext(CephContext* cct, Collection *c, OpSequencer *o)
+    explicit TransContext(CephContext* cct, Collection *c, OpSequencer *o,
+			  list<Context*> *on_commits)
       : ch(c),
 	osr(o),
 	ioc(cct, this),
 	start(ceph_clock_now()) {
       last_stamp = start;
+      if (on_commits) {
+	oncommits.swap(*on_commits);
+      }
     }
     ~TransContext() {
       delete deferred_txn;
@@ -2017,7 +2020,8 @@ private:
   template <int LogLevelV = 30> void _dump_extent_map(ExtentMap& em);
   template <int LogLevelV = 30> void _dump_transaction(Transaction *t);
 
-  TransContext *_txc_create(Collection *c, OpSequencer *osr);
+  TransContext *_txc_create(Collection *c, OpSequencer *osr,
+			    list<Context*> *on_commits);
   void _txc_update_store_statfs(TransContext *txc);
   void _txc_add_transaction(TransContext *txc, Transaction *t);
   void _txc_calc_cost(TransContext *txc);
@@ -2707,16 +2711,16 @@ public:
       assert(min_alloc_size && isp2(min_alloc_size));
       assert(mem_cap);
       
-      total = ROUND_UP_TO(total, min_alloc_size);
+      total = round_up_to(total, min_alloc_size);
       granularity = total * BLOOM_FILTER_TABLE_SIZE * 2 / mem_cap;
 
       if (!granularity) {
 	granularity = min_alloc_size;
       } else {
-	granularity = ROUND_UP_TO(granularity, min_alloc_size);
+	granularity = round_up_to(granularity, min_alloc_size);
       }
 
-      uint64_t entries = P2ROUNDUP(total, granularity) / granularity;
+      uint64_t entries = p2roundup(total, granularity) / granularity;
       collections_bfs.resize(entries,
         bloom_filter(BLOOM_FILTER_SALT_COUNT,
                      BLOOM_FILTER_TABLE_SIZE,
@@ -2815,7 +2819,7 @@ public:
   unsigned apply(KeyValueDB* db);
 
   void note_misreference(uint64_t offs, uint64_t len, bool inc_error) {
-    misreferenced_extents.insert(offs, len);
+    misreferenced_extents.union_insert(offs, len);
     if (inc_error) {
       ++to_repair_cnt;
     }
