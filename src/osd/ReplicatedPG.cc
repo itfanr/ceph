@@ -1485,7 +1485,7 @@ void ReplicatedPG::do_request(
       return;
     }
   }
-
+  //handle_message
   assert(is_peered() && flushes_in_progress == 0);
   if (pgbackend->handle_message(op))
     return;

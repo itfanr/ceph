@@ -1464,6 +1464,7 @@ int OSDMap::apply_incremental(const Incremental &inc)
 }
 
 // mapping
+// 获取目标对象所在的PG
 int OSDMap::object_locator_to_pg(
 	const object_t& oid,
 	const object_locator_t& loc,

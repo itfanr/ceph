@@ -1780,7 +1780,7 @@ public:
 
     // pending ops
     map<ceph_tid_t,Op*> ops;
-    map<uint64_t, LingerOp*> linger_ops;
+    map<uint64_t, LingerOp*> linger_ops;//逗留的操作
     map<ceph_tid_t,CommandOp*> command_ops;
 
     int osd;

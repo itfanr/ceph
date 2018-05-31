@@ -684,6 +684,7 @@ public:
    * set as pg_temp.
    * Each of these pointers must be non-NULL.
    */
+   //通过CRUSH算法，获取该PG对应的OSD列表
   void pg_to_up_acting_osds(pg_t pg, vector<int> *up, int *up_primary,
                             vector<int> *acting, int *acting_primary) const {
     _pg_to_up_acting_osds(pg, up, up_primary, acting, acting_primary);

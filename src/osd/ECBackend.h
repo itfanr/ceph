@@ -394,7 +394,7 @@ public:
     PushReplyOp &op,
     pg_shard_t from,
     RecoveryMessages *m);
-
+//关键数据结构
   map<ceph_tid_t, Op> tid_to_op_map; /// lists below point into here
   list<Op*> writing;
 

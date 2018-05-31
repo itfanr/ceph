@@ -1365,6 +1365,7 @@ struct MustPrependHashInfo : public ObjectModDesc::Visitor {
 
 // 该函数用于最终调用网络接口，把更新请求发送给从OSD，
 // 并调用queue_transactions 函数对该PG的主OSD上的实现更改
+// trim_to、trim_rollback_to表示trim的版本
 void ECBackend::submit_transaction(
   const hobject_t &hoid,
   const eversion_t &at_version,
@@ -1826,6 +1827,7 @@ void ECBackend::start_write(Op *op) {
        ++i) {
     op->pending_apply.insert(*i);
     op->pending_commit.insert(*i);
+	//找到map中的shard_id_t对应的transaction
     map<shard_id_t, ObjectStore::Transaction>::iterator iter =
       trans.find(i->shard);
     assert(iter != trans.end());

@@ -1098,7 +1098,6 @@ void Objecter::_scan_requests(OSDSession *s,
 }
 
 //客户端检测到了osdmap变化
-
 void Objecter::handle_osd_map(MOSDMap *m)
 {
   shunique_lock sul(rwlock, acquire_unique);
@@ -1122,7 +1121,6 @@ void Objecter::handle_osd_map(MOSDMap *m)
 	 = osdmap->get_pools().begin();
        it != osdmap->get_pools().end(); ++it)
     pool_full_map[it->first] = _osdmap_pool_full(it->second);
-
 
   list<LingerOp*> need_resend_linger;
   map<ceph_tid_t, Op*> need_resend;
@@ -1180,8 +1178,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
 		       &pool_full_map, need_resend,
 		       need_resend_linger, need_resend_command, sul);
 
-	// osd addr changes?
-	//重发请求 
+	// osd addr changes?	
 	for (map<int,OSDSession*>::iterator p = osd_sessions.begin();
 	     p != osd_sessions.end(); ) {
 	  OSDSession *s = p->second;
@@ -1669,6 +1666,7 @@ int Objecter::_get_session(int osd, OSDSession **session, shunique_lock& sul)
   }
   OSDSession *s = new OSDSession(cct, osd);
   osd_sessions[osd] = s;
+  //调用messager的get_connection方法。在该方法中继续想办法与目标osd建立连接。
   s->con = messenger->get_connection(osdmap->get_inst(osd));
   logger->inc(l_osdc_osd_session_open);
   logger->inc(l_osdc_osd_sessions, osd_sessions.size());
@@ -2267,7 +2265,7 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   assert(op->session == NULL);
   OSDSession *s = NULL;
 
-  //检查什么？
+  //通过计算当前object的保存的osd，然后将主osd保存在target中
   bool const check_for_latest_map = _calc_target(&op->target,
 						 &op->last_force_resend) == RECALC_OP_TARGET_POOL_DNE;
 
@@ -2337,10 +2335,11 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
 		 << op->target.target_oloc << "' " << op->ops << " tid "
 		 << op->tid << " osd." << (!s->is_homeless() ? s->osd : -1)
 		 << dendl;
-
+ //将当前的op请求与这个session进行绑定，在后面发送请求的时候能知道使用哪一个session进行发送
   _session_op_assign(s, op);
 
   if (need_send) {
+  	//将op转化为MOSDop，后面会以MOSDOp为对象进行处理的
     _send_op(op, m); //发送op给OSD
   }
 
@@ -3080,7 +3079,9 @@ void Objecter::_send_op(Op *op, MOSDOp *m)
   op->incarnation = op->session->incarnation;
 
   m->set_tid(op->tid);
-
+//这个方法会调用SimpleMessager-> send_message(m), 再调用_send_message()
+//再调用submit_message().在submit_message会找到之前的pipe，然后调用pipe->send方法
+//最后通过pipe->writer的线程发送到目标osd。
   op->session->con->send_message(m);
 }
 
