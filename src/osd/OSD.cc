@@ -3718,6 +3718,7 @@ PG* OSD::_make_pg(
   PG *pg;
   if (pi.type == pg_pool_t::TYPE_REPLICATED ||
       pi.type == pg_pool_t::TYPE_ERASURE)
+      //初始化PrimaryLogPG
     pg = new PrimaryLogPG(&service, createmap, pool, ec_profile, pgid);
   else
     ceph_abort();

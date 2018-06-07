@@ -29,7 +29,7 @@ class MOSDMap : public Message {
   uuid_d fsid;
   uint64_t encode_features = 0;
   map<epoch_t, bufferlist> maps;
-  map<epoch_t, bufferlist> incremental_maps;
+  map<epoch_t, bufferlist> incremental_maps;//？？
   epoch_t oldest_map =0, newest_map = 0;
 
   // if we are fetching maps from the mon and have to jump a gap

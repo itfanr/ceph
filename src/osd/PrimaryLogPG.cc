@@ -261,6 +261,7 @@ class PrimaryLogPG::C_OSD_AppliedRecoveredObjectReplica : public Context {
 };
 
 // OpContext
+//来自于PrimaryLogPG::execute_ctx
 void PrimaryLogPG::OpContext::start_async_reads(PrimaryLogPG *pg)
 {
   inflightreads = 1;
@@ -1698,6 +1699,7 @@ void PrimaryLogPG::handle_backoff(OpRequestRef& op)
   session->ack_backoff(cct, m->pgid, m->id, begin, end);
 }
 
+//PG以op为单位处理请求
 void PrimaryLogPG::do_request(
   OpRequestRef& op,
   ThreadPool::TPHandle &handle)
@@ -2144,6 +2146,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     eversion_t version;
     version_t user_version;
     int return_code = 0;
+	//检查是否有重复的请求
     bool got = check_in_progress_op(
       m->get_reqid(), &version, &user_version, &return_code);
     if (got) {
@@ -2314,6 +2317,8 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
 
   dout(25) << __func__ << " oi " << obc->obs.oi << dendl;
 
+//从MOSDOp中获取reqid，是不是Objecter的tid？
+//将op封装为OpContext
   OpContext *ctx = new OpContext(op, m->get_reqid(), &m->ops, obc, this);
 
   if (m->has_flag(CEPH_OSD_FLAG_SKIPRWLOCKS)) {
@@ -3803,6 +3808,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
   dout(10) << __func__ << " " << ctx << dendl;
   ctx->reset_obs(ctx->obc);
   ctx->update_log_only = false; // reset in case finish_copyfrom() is re-running execute_ctx
+  //op挂在ctx上，MOSDOp挂在op上
   OpRequestRef op = ctx->op;
   const MOSDOp *m = static_cast<const MOSDOp*>(op->get_req());
   ObjectContextRef obc = ctx->obc;
@@ -3834,7 +3840,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     }
 
     // version
-    ctx->at_version = get_next_version();
+    ctx->at_version = get_next_version(); //什么版本号？
     ctx->mtime = m->get_mtime();
 
     dout(10) << __func__ << " " << soid << " " << *ctx->ops
@@ -3854,12 +3860,12 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
 
   {
 #ifdef WITH_LTTNG
-    osd_reqid_t reqid = ctx->op->get_reqid();
+    osd_reqid_t reqid = ctx->op->get_reqid(); //Objecter的tid？
 #endif
     tracepoint(osd, prepare_tx_enter, reqid.name._type,
         reqid.name._num, reqid.tid, reqid.inc);
   }
-
+//关键函数
   int result = prepare_transaction(ctx);
 
   {
@@ -3876,7 +3882,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     if (pending_async_reads) {
       assert(pool.info.is_erasure());
       in_progress_async_reads.push_back(make_pair(op, ctx));
-      ctx->start_async_reads(this);
+      ctx->start_async_reads(this);//这里是读流程的入口
     }
     return;
   }
@@ -4002,8 +4008,9 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     });
 
   // issue replica writes
-  ceph_tid_t rep_tid = osd->get_tid();
-
+  // 成员last_tid
+  ceph_tid_t rep_tid = osd->get_tid(); //每个osd一个递增的tid？
+ //两个tid的概念？repop是主osd级别的概念？
   RepGather *repop = new_repop(ctx, obc, rep_tid);
 
   issue_repop(repop, ctx);
@@ -8202,6 +8209,8 @@ hobject_t PrimaryLogPG::get_temp_recovery_object(
   return hoid;
 }
 
+//关键函数
+//上面的流程是PrimaryLogPG::execute_ctx
 int PrimaryLogPG::prepare_transaction(OpContext *ctx)
 {
   assert(!ctx->ops->empty());
@@ -8213,6 +8222,7 @@ int PrimaryLogPG::prepare_transaction(OpContext *ctx)
   }
 
   // prepare the actual mutation
+  //ctx->ops是一个指针
   int result = do_osd_ops(ctx, *ctx->ops);
   if (result < 0) {
     if (ctx->op->may_write() &&
@@ -10251,6 +10261,7 @@ void PrimaryLogPG::eval_repop(RepGather *repop)
   }
 }
 
+//上面的流程是 PrimaryLogPG::execute_ctx
 void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
 {
   FUNCTRACE(cct);
@@ -10259,8 +10270,8 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
           << " o " << soid
           << dendl;
 
-  repop->v = ctx->at_version;
-  if (ctx->at_version > eversion_t()) {
+  repop->v = ctx->at_version; //pg的下一个版本号？
+  if (ctx->at_version > eversion_t()) { //eversion_t() ？？
     for (set<pg_shard_t>::iterator i = acting_recovery_backfill.begin();
 	 i != acting_recovery_backfill.end();
 	 ++i) {
@@ -10328,13 +10339,30 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
   }
   dout(30) << __func__ << " missing_loc after: " << missing_loc.get_locations(soid) << dendl;
 
+//这里是写流程的入口
+/* 函数原型
+  void ECBackend::submit_transaction(
+	const hobject_t &hoid,
+	const object_stat_sum_t &delta_stats,
+	const eversion_t &at_version,
+	PGTransactionUPtr &&t,
+	const eversion_t &trim_to,
+	const eversion_t &roll_forward_to,
+	const vector<pg_log_entry_t> &log_entries,
+	boost::optional<pg_hit_set_history_t> &hset_history,
+	Context *on_all_commit,
+	ceph_tid_t tid,
+	osd_reqid_t reqid,
+	OpRequestRef client_op
+	)
+*/
   pgbackend->submit_transaction(
     soid,
     ctx->delta_stats,
     ctx->at_version,
     std::move(ctx->op_t),
-    pg_trim_to,
-    min_last_complete_ondisk,
+    pg_trim_to, //父类PG的成员
+    min_last_complete_ondisk,//父类PG的成员
     ctx->log,
     ctx->updated_hset_history,
     on_all_commit,

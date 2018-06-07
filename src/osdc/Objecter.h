@@ -1221,7 +1221,7 @@ private:
   std::atomic<unsigned> inflight_ops{0};
   std::atomic<int> client_inc{-1};
   uint64_t max_linger_id;
-  std::atomic<unsigned> num_in_flight{0};
+  std::atomic<unsigned> num_in_flight{0};//flight状态的op
   std::atomic<int> global_op_flags{0}; // flags which are applied to each IO op
   bool keep_balanced_budget;
   bool honor_osdmap_full;

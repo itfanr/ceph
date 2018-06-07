@@ -1417,6 +1417,7 @@ void ECBackend::dump_recovery_info(Formatter *f) const
   f->close_section();
 }
 
+//上面的流程：PrimaryLogPG::issue_repop
 void ECBackend::submit_transaction(
   const hobject_t &hoid,
   const object_stat_sum_t &delta_stats,
@@ -1449,7 +1450,7 @@ void ECBackend::submit_transaction(
     op->trace = client_op->pg_trace;
   
   dout(10) << __func__ << ": op " << *op << " starting" << dendl;
-  start_rmw(op, std::move(t));
+  start_rmw(op, std::move(t));//这里是写流程的入口
 }
 
 void ECBackend::call_write_ordered(std::function<void(void)> &&cb) {
@@ -1544,7 +1545,7 @@ int ECBackend::get_min_avail_to_read_shards(
 
   get_all_avail_shards(hoid, error_shards, have, shards, for_recovery);
 
-  map<int, vector<pair<int, int>>> need;
+  map<int, vector<pair<int, int>>> need;//表示什么？
   int r = ec_impl->minimum_to_decode(want, have, &need);
   if (r < 0)
     return r;
@@ -1621,8 +1622,10 @@ void ECBackend::start_read_op(
   bool do_redundant_reads,
   bool for_recovery)
 {
+ //get_parent()是PrimaryLogPG，tid唯一代表请求
   ceph_tid_t tid = get_parent()->get_tid();
   assert(!tid_to_read_map.count(tid));
+  //开始构建ReadOp
   auto &op = tid_to_read_map.emplace(
     tid,
     ReadOp(
@@ -1651,29 +1654,35 @@ void ECBackend::do_read_op(ReadOp &op)
   map<pg_shard_t, ECSubRead> messages;
   for (map<hobject_t, read_request_t>::iterator i = op.to_read.begin();
        i != op.to_read.end();
-       ++i) {
+       ++i) {//一个op可能带有多个hobject请求，遍历每个hojbect请求
     bool need_attrs = i->second.want_attrs;
 
+	//const map<pg_shard_t, vector<pair<int, int>>> need;//代表什么？
     for (auto j = i->second.need.begin();
 	 j != i->second.need.end();
 	 ++j) {
       if (need_attrs) {
-	messages[j->first].attrs_to_read.insert(i->first);
-	need_attrs = false;
+		messages[j->first].attrs_to_read.insert(i->first);
+		need_attrs = false;
       }
       messages[j->first].subchunks[i->first] = j->second;
-      op.obj_to_source[i->first].insert(j->first);
-      op.source_to_obj[j->first].insert(i->first);
+      op.obj_to_source[i->first].insert(j->first);//对象和pg_shard_t
+      op.source_to_obj[j->first].insert(i->first);//ph_shard_t和对象
     }
+
+	 //由要读取的offset和len获取对应的pg_id，并准备message
     for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
 	   i->second.to_read.begin();
 	 j != i->second.to_read.end();
-	 ++j) {
+	 ++j) {　//遍历每个hobject_t对应的read_request_t的to_read
+	  //offset and len
       pair<uint64_t, uint64_t> chunk_off_len =
 	sinfo.aligned_offset_len_to_chunk(make_pair(j->get<0>(), j->get<1>()));
-      for (auto k = i->second.need.begin();
+      for (auto k = i->second.need.begin();//一个对象对应多个pg_shard_t
 	   k != i->second.need.end();
-	   ++k) {
+	   ++k) {//遍历每个hobject_t对应的read_request_t的need
+	   //map<hobject_t, list<boost::tuple<uint64_t, uint64_t, uint32_t> >> to_read;
+	   //以pg_shard_t为key，保存对象，方便组装消息发送给pg
 	messages[k->first].to_read[i->first].push_back(
 	  boost::make_tuple(
 	    chunk_off_len.first,
@@ -1688,23 +1697,24 @@ void ECBackend::do_read_op(ReadOp &op)
        i != messages.end();
        ++i) {
     op.in_progress.insert(i->first);
-    shard_to_read_map[i->first].insert(op.tid);
+    shard_to_read_map[i->first].insert(op.tid);//记录pg_shard_t上的tid
     i->second.tid = tid;
     MOSDECSubOpRead *msg = new MOSDECSubOpRead;
     msg->set_priority(priority);
     msg->pgid = spg_t(
       get_parent()->whoami_spg_t().pgid,
       i->first.shard);
-    msg->map_epoch = get_parent()->get_epoch();
+    msg->map_epoch = get_parent()->get_epoch();//osdmap版本号？
     msg->min_epoch = get_parent()->get_interval_start_epoch();
-    msg->op = i->second;
-    msg->op.from = get_parent()->whoami_shard();
+    msg->op = i->second; //ECSubRead作为了op
+    msg->op.from = get_parent()->whoami_shard();//主osd的编号
     msg->op.tid = tid;
     if (op.trace) {
       // initialize a child span for this shard
       msg->trace.init("ec sub read", nullptr, &op.trace);
       msg->trace.keyval("shard", i->first.shard.id);
     }
+	//发送给相关的所有osd
     get_parent()->send_message_osd_cluster(
       i->first.osd,
       msg,
@@ -2094,20 +2104,29 @@ int ECBackend::objects_read_sync(
   return -EOPNOTSUPP;
 }
 
+//来自于PrimaryLogPG::OpContext::start_async_reads
+// in.swap(pending_async_reads);
+// pg->pgbackend->objects_read_async(
+//    obc->obs.oi.soid,
+//    in,
+//    new OnReadComplete(pg, this), pg->get_pool().fast_read);
 void ECBackend::objects_read_async(
   const hobject_t &hoid,
   const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
-             pair<bufferlist*, Context*> > > &to_read,
+                    pair<bufferlist*, Context*> > > &to_read,
   Context *on_complete,
   bool fast_read)
 {
-  map<hobject_t,std::list<boost::tuple<uint64_t, uint64_t, uint32_t> > >
-    reads;
+	//<off, len, op_flags>
+	//read的元素有几个？
+  map<hobject_t,std::list<boost::tuple<uint64_t, uint64_t, uint32_t> > >  reads;
 
   uint32_t flags = 0;
   extent_set es;
+  //to_read: pending async reads <off, len, op_flags> -> <outbl, outr>
+  //一个读请求，带有对一个对象的多个offset和len？
   for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
-	 pair<bufferlist*, Context*> > >::const_iterator i =
+	 		pair<bufferlist*, Context*> > >::const_iterator i =
 	 to_read.begin();
        i != to_read.end();
        ++i) {
@@ -2132,6 +2151,7 @@ void ECBackend::objects_read_async(
     }
   }
 
+//仿函数
   struct cb {
     ECBackend *ec;
     hobject_t hoid;
@@ -2150,7 +2170,7 @@ void ECBackend::objects_read_async(
 	to_read(to_read),
 	on_complete(on_complete) {}
     void operator()(map<hobject_t,pair<int, extent_map> > &&results) {
-      auto dpp = ec->get_parent()->get_dpp();
+      auto dpp = ec->get_parent()->get_dpp();//get_parent是谁？
       ldpp_dout(dpp, 20) << "objects_read_async_cb: got: " << results
 			 << dendl;
       ldpp_dout(dpp, 20) << "objects_read_async_cb: cache: " << ec->cache
@@ -2187,17 +2207,27 @@ void ECBackend::objects_read_async(
 	}
       }
       to_read.clear();
-      if (on_complete) {
+      if (on_complete) {//实际上是new OnReadComplete(pg, this), pg->get_pool().fast_read)
 	on_complete.release()->complete(r);
       }
     }
     ~cb() {
       for (auto &&i: to_read) {
-	delete i.second.second;
+		delete i.second.second;
       }
       to_read.clear();
     }
   };
+
+  /*
+  template <typename T, typename F>
+  GenContextURef<T> make_gen_lambda_context(F &&f) {
+	return GenContextURef<T>(new LambdaGenContext<F, T>(std::move(f)));
+  }
+  */
+  //make_gen_lambda_context函数封装了一个LambdaGenContext，其可通过finish方法调用自身
+  //make_gen_lambda_context返回类型是GenContext<map<hobject_t,pair<int, extent_map> > &&>
+  //cb的调用方式：cb(map<hobject_t,pair<int, extent_map> > &&results)
   objects_read_and_reconstruct(
     reads,
     fast_read,
@@ -2240,13 +2270,13 @@ struct CallClientContexts :
 	     res.returned.front().get<2>().begin();
 	   j != res.returned.front().get<2>().end();
 	   ++j) {
-	to_decode[j->first.shard].claim(j->second);
+		to_decode[j->first.shard].claim(j->second);
       }
       int r = ECUtil::decode(
-	ec->sinfo,
-	ec->ec_impl,
-	to_decode,
-	&bl);
+		ec->sinfo,
+		ec->ec_impl,
+		to_decode,
+		&bl);
       if (r < 0) {
         res.r = r;
         goto out;
@@ -2274,6 +2304,7 @@ void ECBackend::objects_read_and_reconstruct(
   bool fast_read,
   GenContextURef<map<hobject_t,pair<int, extent_map> > &&> &&func)
 {
+	//reads.size()一般是1？可能是多个吗？
   in_progress_client_reads.emplace_back(
     reads.size(), std::move(func));
   if (!reads.size()) {
@@ -2283,10 +2314,12 @@ void ECBackend::objects_read_and_reconstruct(
 
   map<hobject_t, set<int>> obj_want_to_read;
   set<int> want_to_read;
-  get_want_to_read_shards(&want_to_read);
+  get_want_to_read_shards(&want_to_read);//涉及到纠删算法实现
     
   map<hobject_t, read_request_t> for_read_op;
+  //reads: <off, len, op_flags>
   for (auto &&to_read: reads) {
+  	//shards表示什么？没看懂
     map<pg_shard_t, vector<pair<int, int>>> shards;
     int r = get_min_avail_to_read_shards(
       to_read.first,
@@ -2301,6 +2334,8 @@ void ECBackend::objects_read_and_reconstruct(
       this,
       &(in_progress_client_reads.back()),
       to_read.second);
+	//构造read_request_t
+	//for_read_op 关键
     for_read_op.insert(
       make_pair(
 	to_read.first,

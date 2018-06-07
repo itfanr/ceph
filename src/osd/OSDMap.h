@@ -772,6 +772,7 @@ public:
 				const map<string,string>& profile) {
     erasure_code_profiles[name] = profile;
   }
+//获取纠删池的配置文件profile
   const map<string,string> &get_erasure_code_profile(
     const string &name) const {
     static map<string,string> empty;
@@ -1272,6 +1273,7 @@ public:
   bool have_pg_pool(int64_t p) const {
     return pools.count(p);
   }
+  //获取对象所在池子的信息
   const pg_pool_t* get_pg_pool(int64_t p) const {
     auto i = pools.find(p);
     if (i != pools.end())

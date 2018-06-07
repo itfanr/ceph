@@ -118,6 +118,7 @@ struct bl_split_merge {
 using extent_set = interval_set<uint64_t>;
 using extent_map = interval_map<uint64_t, bufferlist, bl_split_merge>;
 
+//cache 
 class ExtentCache {
   struct object_extent_set;
   struct pin_state;

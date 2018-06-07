@@ -2845,6 +2845,7 @@ bool PG::check_in_progress_op(
   int *return_code) const
 {
   return (
+  	//projected_log = PGLog::IndexedLog();
     projected_log.get_request(r, version, user_version, return_code) ||
     pg_log.get_log().get_request(r, version, user_version, return_code));
 }

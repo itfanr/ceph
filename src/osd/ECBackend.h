@@ -160,13 +160,16 @@ public:
       assert(!results.count(hoid));
       results.emplace(hoid, make_pair(err, std::move(buffers)));
     }
+	  //表示是否读完
     bool is_complete() const {
       return objects_to_read == 0;
     }
     void run() {
+      //uniqueue_ptr release()后返回的是GenContext原始指针
       func.release()->complete(std::move(results));
     }
   };
+	//in_progress_client_reads用来保证读的顺序
   list<ClientAsyncReadStatus> in_progress_client_reads;
   void objects_read_async(
     const hobject_t &hoid,
@@ -176,6 +179,7 @@ public:
     bool fast_read = false) override;
 
   template <typename Func>
+  	//no cache？？
   void objects_read_async_no_cache(
     const map<hobject_t,extent_set> &to_read,
     Func &&on_complete) {
@@ -183,7 +187,7 @@ public:
     for (auto &&hpair: to_read) {
       auto &l = _to_read[hpair.first];
       for (auto extent: hpair.second) {
-	l.emplace_back(extent.first, extent.second, 0);
+		l.emplace_back(extent.first, extent.second, 0);
       }
     }
     objects_read_and_reconstruct(
@@ -194,6 +198,7 @@ public:
 	  std::forward<Func>(on_complete)));
   }
   void kick_reads() {
+   //list<ClientAsyncReadStatus>
     while (in_progress_client_reads.size() &&
 	   in_progress_client_reads.front().is_complete()) {
       in_progress_client_reads.front().run();
@@ -351,7 +356,7 @@ public:
   };
   struct read_request_t {
     const list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
-    const map<pg_shard_t, vector<pair<int, int>>> need;
+    const map<pg_shard_t, vector<pair<int, int>>> need;//代表什么？
     const bool want_attrs;
     GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb;
     read_request_t(

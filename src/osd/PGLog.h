@@ -80,6 +80,7 @@ public:
    */
   struct IndexedLog : public pg_log_t {
     mutable ceph::unordered_map<hobject_t,pg_log_entry_t*> objects;  // ptrs into log.  be careful!
+    //
     mutable ceph::unordered_map<osd_reqid_t,pg_log_entry_t*> caller_ops;
     mutable ceph::unordered_multimap<osd_reqid_t,pg_log_entry_t*> extra_caller_ops;
     mutable ceph::unordered_map<osd_reqid_t,pg_log_dup_t*> dup_index;

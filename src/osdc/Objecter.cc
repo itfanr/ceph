@@ -1173,10 +1173,12 @@ void Objecter::handle_osd_map(MOSDMap *m)
     ldout(cct, 3) << "handle_osd_map got epochs ["
 		  << m->get_first() << "," << m->get_last()
 		  << "] > " << osdmap->get_epoch() << dendl;
-
+   //如果不是初始版本的osdmap
     if (osdmap->get_epoch()) {
       bool skipped_map = false;
+	  
       // we want incrementals
+      //递增，挨个遍历epoch
       for (epoch_t e = osdmap->get_epoch() + 1;
 	   e <= m->get_last();
 	   e++) {
@@ -1229,6 +1231,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
 	    _prune_snapc(m->gap_removed_snaps, i.second);
 	  }
 	}
+	//检查need_resend、need_resend_linger、need_resend_command
 	_scan_requests(homeless_session, skipped_map, cluster_full,
 		       &pool_full_map, need_resend,
 		       need_resend_linger, need_resend_command, sul,
@@ -1279,6 +1282,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
   }
 
   // make sure need_resend targets reflect latest map
+  // 删除不用重发的need_resend请求
   for (auto p = need_resend.begin(); p != need_resend.end(); ) {
     Op *op = p->second;
     if (op->target.epoch < osdmap->get_epoch()) {
@@ -1325,15 +1329,17 @@ void Objecter::handle_osd_map(MOSDMap *m)
     if (op->should_resend) {
       if (!op->session->is_homeless() && !op->target.paused) {
 	logger->inc(l_osdc_op_resend);
-	_send_op(op);
+	_send_op(op); //重发请求
       }
     } else {
       _op_cancel_map_check(op);
-      _cancel_linger_op(op);
+      _cancel_linger_op(op); //删除linger的请求
     }
     sl.unlock();
     put_session(s);
   }
+
+	   //need_resend_linger requests
   for (list<LingerOp*>::iterator p = need_resend_linger.begin();
        p != need_resend_linger.end(); ++p) {
     LingerOp *op = *p;
@@ -1343,12 +1349,12 @@ void Objecter::handle_osd_map(MOSDMap *m)
       const int r = _get_session(op->target.osd, &s, sul);
       assert(r == 0);
       assert(s != NULL);
-      op->session = s;
+      op->session = s;//重新设置session
       put_session(s);
     }
     if (!op->session->is_homeless()) {
       logger->inc(l_osdc_linger_resend);
-      _send_linger(op, sul);
+      _send_linger(op, sul);//重发请求
     }
   }
   for (map<ceph_tid_t,CommandOp*>::iterator p = need_resend_command.begin();
@@ -2386,7 +2392,7 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   // pick target
   assert(op->session == NULL);
   OSDSession *s = NULL;
-
+//计算对象的位置信息
   bool check_for_latest_map = _calc_target(&op->target, nullptr)
     == RECALC_OP_TARGET_POOL_DNE;
 
@@ -3086,6 +3092,7 @@ void Objecter::_session_command_op_assign(OSDSession *to, CommandOp *op)
   ldout(cct, 15) << __func__ << " " << to->osd << " " << op->tid << dendl;
 }
 
+//重新计算target
 int Objecter::_recalc_linger_op_target(LingerOp *linger_op,
 				       shunique_lock& sul)
 {
@@ -3374,7 +3381,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
 
   OSDSession::unique_lock sl(s->lock);
 
-  map<ceph_tid_t, Op *>::iterator iter = s->ops.find(tid);
+  map<ceph_tid_t, Op *>::iterator iter = s->ops.find(tid);//pending ops
   if (iter == s->ops.end()) {
     ldout(cct, 7) << "handle_osd_op_reply " << tid
 		  << (m->is_ondisk() ? " ondisk" : (m->is_onnvram() ?
@@ -3409,6 +3416,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
     return;
   }
 
+//需要重发
   if (m->get_retry_attempt() >= 0) {
     if (m->get_retry_attempt() != (op->attempts - 1)) {
       ldout(cct, 7) << " ignoring reply from attempt "
@@ -3440,6 +3448,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
     // FIXME: two redirects could race and reorder
 
     op->tid = 0;
+	//转发到其他对象
     m->get_redirect().combine_with_locator(op->target.target_oloc,
 					   op->target.target_oid.name);
     op->target.flags |= (CEPH_OSD_FLAG_REDIRECTED | CEPH_OSD_FLAG_IGNORE_OVERLAY);
@@ -3509,7 +3518,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
       **pr = ceph_to_hostos_errno(p->rval);
     if (*ph) {
       ldout(cct, 10) << " op " << i << " handler " << *ph << dendl;
-      (*ph)->complete(ceph_to_hostos_errno(p->rval));
+      (*ph)->complete(ceph_to_hostos_errno(p->rval)); //调用回调
       *ph = NULL;
     }
   }
@@ -3528,7 +3537,7 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   auto completion_lock = s->get_lock(op->target.base_oid);
 
   ldout(cct, 15) << "handle_osd_op_reply completed tid " << tid << dendl;
-  _finish_op(op, 0);
+  _finish_op(op, 0);//op处理结束
 
   ldout(cct, 5) << num_in_flight << " in flight" << dendl;
 
@@ -4414,6 +4423,7 @@ void Objecter::ms_handle_connect(Connection *con)
     resend_mon_ops();
 }
 
+//继承了dispatcher类的接口
 bool Objecter::ms_handle_reset(Connection *con)
 {
   if (!initialized)
