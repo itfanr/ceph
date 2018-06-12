@@ -243,6 +243,7 @@ void ReplicatedBackend::on_change()
   clear_recovery_state();
 }
 
+//来自于 PrimaryLogPG::do_read
 int ReplicatedBackend::objects_read_sync(
   const hobject_t &hoid,
   uint64_t off,

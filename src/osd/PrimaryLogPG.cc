@@ -3818,6 +3818,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
   // before we finally apply the resulting transaction.
   ctx->op_t.reset(new PGTransaction);
 
+ //写操作
   if (op->may_write() || op->may_cache()) {
     // snap
     if (!(m->has_flag(CEPH_OSD_FLAG_ENFORCE_SNAPC)) &&
@@ -3865,7 +3866,9 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     tracepoint(osd, prepare_tx_enter, reqid.name._type,
         reqid.name._num, reqid.tid, reqid.inc);
   }
-//关键函数
+//关键函数调用的do_osd_ops遍历每个op
+//如果是读请求，则do_osd_ops -> do_read将读请求加入ctx->pending_async_reads 队列
+//如果是写，则do_osd_ops ->PGTransaction::write
   int result = prepare_transaction(ctx);
 
   {
@@ -3881,6 +3884,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     // come back later.
     if (pending_async_reads) {
       assert(pool.info.is_erasure());
+	  //in_progress_async_reads记录了当前的op和ctx对
       in_progress_async_reads.push_back(make_pair(op, ctx));
       ctx->start_async_reads(this);//这里是读流程的入口
     }
@@ -3932,6 +3936,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
   // verify that we are doing this in order?
   if (cct->_conf->osd_debug_op_order && m->get_source().is_client() &&
       !pool.info.is_tier() && !pool.info.has_tiers()) {
+      //由hobject_t索引到客户端的信息
     map<client_t,ceph_tid_t>& cm = debug_op_order[obc->obs.oi.soid];
     ceph_tid_t t = m->get_tid();
     client_t n = m->get_source().num();
@@ -4014,7 +4019,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
   RepGather *repop = new_repop(ctx, obc, rep_tid);
 
   issue_repop(repop, ctx);
-  eval_repop(repop);
+  eval_repop(repop);//op结束
   repop->put();
 }
 
@@ -5373,6 +5378,7 @@ int PrimaryLogPG::finish_extent_cmp(OSDOp& osd_op, const bufferlist &read_bl)
   return 0;
 }
 
+//计算offset和length
 int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
   dout(20) << __func__ << dendl;
   auto& op = osd_op.op;
@@ -5404,7 +5410,7 @@ int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
     // read size was trimmed to zero and it is expected to do nothing
     // a read operation of 0 bytes does *not* do nothing, this is why
     // the trimmed_read boolean is needed
-  } else if (pool.info.is_erasure()) {
+  } else if (pool.info.is_erasure()) { //EC pool
     // The initialisation below is required to silence a false positive
     // -Wmaybe-uninitialized warning
     boost::optional<uint32_t> maybe_crc = boost::make_optional(false, uint32_t());
@@ -5414,6 +5420,7 @@ int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
     if (oi.is_data_digest() && op.extent.offset == 0 &&
         op.extent.length >= oi.size)
       maybe_crc = oi.data_digest;
+	//异步读队列
     ctx->pending_async_reads.push_back(
       make_pair(
         boost::make_tuple(op.extent.offset, op.extent.length, op.flags),
@@ -5425,7 +5432,7 @@ int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
 
     ctx->op_finishers[ctx->current_osd_subop_num].reset(
       new ReadFinisher(osd_op));
-  } else {
+  } else { //not a EC pool
     int r = pgbackend->objects_read_sync(
       soid, op.extent.offset, op.extent.length, op.flags, &osd_op.outdata);
     // whole object?  can we verify the checksum?
@@ -5615,9 +5622,10 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
   dout(10) << "do_osd_op " << soid << " " << ops << dendl;
 
   ctx->current_osd_subop_num = 0;
+  //遍历每个ops，后面就是一个大循环
   for (auto p = ops.begin(); p != ops.end(); ++p, ctx->current_osd_subop_num++, ctx->processed_subop_count++) {
     OSDOp& osd_op = *p;
-    ceph_osd_op& op = osd_op.op;
+    ceph_osd_op& op = osd_op.op; //ceph_osd_op记录的是数据内容
 
     OpFinisher* op_finisher = nullptr;
     {
@@ -5653,10 +5661,11 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       break;
     default:
       if (op.op & CEPH_OSD_OP_MODE_WR)
-	ctx->user_modify = true;
+	ctx->user_modify = true;//
     }
 
     // munge -1 truncate to 0 truncate
+    //ceph_osd_op_uses_extent？？干啥的
     if (ceph_osd_op_uses_extent(op.op) &&
         op.extent.truncate_seq == 1 &&
         op.extent.truncate_size == (-1ULL)) {
@@ -5684,7 +5693,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       
       // --- READS ---
 
-    case CEPH_OSD_OP_CMPEXT:
+    case CEPH_OSD_OP_CMPEXT: //什么操作？
       ++ctx->num_read;
       tracepoint(osd, do_osd_op_pre_extent_cmp, soid.oid.name.c_str(),
 		 soid.snap.val, oi.size, oi.truncate_seq, op.extent.offset,
@@ -5692,7 +5701,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 		 op.extent.truncate_seq);
 
       if (op_finisher == nullptr) {
-	result = do_extent_cmp(ctx, osd_op);
+	result = do_extent_cmp(ctx, osd_op);//这是什么？
       } else {
 	result = op_finisher->execute();
       }
@@ -5704,7 +5713,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	break;
       }
       // fall through
-    case CEPH_OSD_OP_READ:
+    case CEPH_OSD_OP_READ: //读
       ++ctx->num_read;
       tracepoint(osd, do_osd_op_pre_read, soid.oid.name.c_str(),
 		 soid.snap.val, oi.size, oi.truncate_seq, op.extent.offset,
@@ -5714,7 +5723,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (!ctx->data_off) {
 	  ctx->data_off = op.extent.offset;
 	}
-	result = do_read(ctx, osd_op);
+	result = do_read(ctx, osd_op); //EC是异步读
       } else {
 	result = op_finisher->execute();
       }
@@ -6302,7 +6311,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
       // -- object data --
 
-    case CEPH_OSD_OP_WRITE:
+    case CEPH_OSD_OP_WRITE: //写
       ++ctx->num_write;
       { // write
         __u32 seq = oi.truncate_seq;
@@ -6383,6 +6392,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    t->nop(soid);
 	  }
 	} else {
+	//PGTransaction::write
 	  t->write(
 	    soid, op.extent.offset, op.extent.length, osd_op.indata, op.flags);
 	}
@@ -6402,7 +6412,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	write_update_size_and_usage(ctx->delta_stats, oi, ctx->modified_ranges,
 				    op.extent.offset, op.extent.length);
 
-      }
+      }//写结束
       break;
       
     case CEPH_OSD_OP_WRITEFULL:
@@ -11961,6 +11971,7 @@ void PrimaryLogPG::_on_new_interval()
   assert(pg_log.get_missing().may_include_deletes == get_osdmap()->test_flag(CEPH_OSDMAP_RECOVERY_DELETES));
 }
 
+//什么流程？
 void PrimaryLogPG::on_change(ObjectStore::Transaction *t)
 {
   dout(10) << __func__ << dendl;

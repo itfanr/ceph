@@ -1130,6 +1130,7 @@ void ECBackend::handle_sub_read_reply(
       boost::tuple<
 	uint64_t, uint64_t, map<pg_shard_t, bufferlist> > >::iterator riter =
       rop.complete[i->first].returned.begin();
+	//填充rop.complete
     for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
 	 j != i->second.end();
 	 ++j, ++req_iter, ++riter) {
@@ -1251,7 +1252,10 @@ void ECBackend::complete_read_op(ReadOp &rop, RecoveryMessages *m)
     if (reqiter->second.cb) {
       pair<RecoveryMessages *, read_result_t &> arg(
 	m, resiter->second);
-      reqiter->second.cb->complete(arg);
+	  //这个cb是objects_read_and_reconstruct函数中注册的CallClientContexts
+	  //read_request_t是在objects_read_and_reconstruct函数中构建的，
+	  //其cb就是CallClientContexts
+      reqiter->second.cb->complete(arg); 
       reqiter->second.cb = nullptr;
     }
   }
@@ -1670,7 +1674,7 @@ void ECBackend::do_read_op(ReadOp &op)
       op.source_to_obj[j->first].insert(i->first);//ph_shard_t和对象
     }
 
-	 //由要读取的offset和len获取对应的pg_id，并准备message
+	 //由要读取的offset和len获取对应的pg_id，并准备messages
     for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
 	   i->second.to_read.begin();
 	 j != i->second.to_read.end();
@@ -2110,6 +2114,7 @@ int ECBackend::objects_read_sync(
 //    obc->obs.oi.soid,
 //    in,
 //    new OnReadComplete(pg, this), pg->get_pool().fast_read);
+//on_complete是指回调函数
 void ECBackend::objects_read_async(
   const hobject_t &hoid,
   const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
@@ -2179,7 +2184,7 @@ void ECBackend::objects_read_async(
       auto &got = results[hoid];
 
       int r = 0;
-      for (auto &&read: to_read) {
+      for (auto &&read: to_read) { //多个读？
 	if (got.first < 0) {
 	  if (read.second.second) {
 	    read.second.second->complete(got.first);
@@ -2207,8 +2212,9 @@ void ECBackend::objects_read_async(
 	}
       }
       to_read.clear();
+	  //cb中调用了OnReadComplete的回调
       if (on_complete) {//实际上是new OnReadComplete(pg, this), pg->get_pool().fast_read)
-	on_complete.release()->complete(r);
+	on_complete.release()->complete(r);//release是什么？
       }
     }
     ~cb() {
@@ -2293,7 +2299,7 @@ struct CallClientContexts :
     }
 out:
     status->complete_object(hoid, res.r, std::move(result));
-    ec->kick_reads();
+    ec->kick_reads();//在这里调用run()，实际上调用的是cb
   }
 };
 
@@ -2332,7 +2338,7 @@ void ECBackend::objects_read_and_reconstruct(
     CallClientContexts *c = new CallClientContexts(
       to_read.first,
       this,
-      &(in_progress_client_reads.back()),
+      &(in_progress_client_reads.back()), //保存的是make_gen_lambda_context封装过的cb
       to_read.second);
 	//构造read_request_t
 	//for_read_op 关键

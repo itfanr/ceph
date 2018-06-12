@@ -145,6 +145,7 @@ public:
   friend struct CallClientContexts;
   struct ClientAsyncReadStatus {
     unsigned objects_to_read;
+	//实际上是make_gen_lambda_context封装过的cb
     GenContextURef<map<hobject_t,pair<int, extent_map> > &&> func;
     map<hobject_t,pair<int, extent_map> > results;
     explicit ClientAsyncReadStatus(
@@ -166,6 +167,8 @@ public:
     }
     void run() {
       //uniqueue_ptr release()后返回的是GenContext原始指针
+      //实际上fun是objects_read_async函数创建的lambda函数，即封装的cb
+      //cb的operator()函数体调用了OnReadComplete的回调
       func.release()->complete(std::move(results));
     }
   };
@@ -201,7 +204,7 @@ public:
    //list<ClientAsyncReadStatus>
     while (in_progress_client_reads.size() &&
 	   in_progress_client_reads.front().is_complete()) {
-      in_progress_client_reads.front().run();
+      in_progress_client_reads.front().run();//调用cb
       in_progress_client_reads.pop_front();
     }
   }

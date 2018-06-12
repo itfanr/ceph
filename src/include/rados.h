@@ -548,7 +548,7 @@ const char *ceph_osd_backoff_op_name(int op);
  * payload
  */
 struct ceph_osd_op {
-	__le16 op;           /* CEPH_OSD_OP_* */
+	__le16 op;           /* CEPH_OSD_OP_* */   op的类型
 	__le32 flags;        /* CEPH_OSD_OP_FLAG_* */
 	union {
 		struct {
