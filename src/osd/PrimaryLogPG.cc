@@ -284,7 +284,7 @@ void PrimaryLogPG::OpContext::finish_read(PrimaryLogPG *pg)
 
     // Restart the op context now that all reads have been
     // completed. Read failures will be handled by the op finisher
-    pg->execute_ctx(this);
+    pg->execute_ctx(this);//读结束
   }
 }
 
@@ -3922,7 +3922,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     if (result >= 0)
       do_osd_op_effects(ctx, m->get_connection());
 
-    complete_read_ctx(result, ctx);
+    complete_read_ctx(result, ctx);//读流程结束，在这里回复客户端
     return;
   }
 
