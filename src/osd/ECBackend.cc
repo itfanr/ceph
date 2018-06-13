@@ -1172,7 +1172,7 @@ void ECBackend::handle_sub_read_reply(
   siter->second.erase(op.tid);
 
   assert(rop.in_progress.count(from));
-  rop.in_progress.erase(from);
+  rop.in_progress.erase(from);//处理完一个pg的读
   unsigned is_complete = 0;
   // For redundant reads check for completion as each shard comes in,
   // or in a non-recovery read check for completion once all the shards read.
@@ -1700,7 +1700,7 @@ void ECBackend::do_read_op(ReadOp &op)
   for (map<pg_shard_t, ECSubRead>::iterator i = messages.begin();
        i != messages.end();
        ++i) {
-    op.in_progress.insert(i->first);
+    op.in_progress.insert(i->first);//插入pg的读，在handle_sub_read_reply函数中erase
     shard_to_read_map[i->first].insert(op.tid);//记录pg_shard_t上的tid
     i->second.tid = tid;
     MOSDECSubOpRead *msg = new MOSDECSubOpRead;
